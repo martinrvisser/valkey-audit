@@ -1,0 +1,8 @@
+FROM fedora:41
+
+VOLUME [ "/valkey-audit", "/test" ]
+
+RUN yum -y install valkey
+
+WORKDIR /valkey-audit
+CMD [ "valkey-server", "/test/valkey.conf" ]

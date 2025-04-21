@@ -1,0 +1,951 @@
+#include "valkeymodule.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+
+#define MAX_LOG_SIZE 10000
+#define MAX_BUFFER_SIZE 1024
+
+static ValkeyModuleCommandFilter *filter;
+
+/* Module configuration */
+typedef struct ConnectionAuditConfig {
+    int log_auth_failures;  /* 1 = log auth failures, 0 = don't log */
+    char *log_file;         /* Path to the log file when not storing in Valkey */
+    size_t max_log_size;    /* Number of entries to buffer before writing to file */
+} ConnectionAuditConfig;
+
+/* Global configuration with defaults */
+static ConnectionAuditConfig config = {
+    .log_auth_failures = 1,
+    .log_file = NULL,
+    .max_log_size = MAX_LOG_SIZE
+};
+
+/* Connection stats */
+typedef struct ConnectionStats {
+    size_t total_connections;
+    size_t active_connections;
+    size_t auth_failures;
+    time_t start_time;
+} ConnectionStats;
+
+static ConnectionStats stats = {0};
+
+// Define a hash table structure for client ID to username mapping
+typedef struct ClientUsernameEntry {
+    uint64_t client_id;
+    char *username;
+    int no_audit; // indicator if the user's commands should not be logged
+    struct ClientUsernameEntry *next;
+} ClientUsernameEntry;
+
+#define USERNAME_HASH_SIZE 1024  // Size of hash table (power of 2 is ideal)
+static ClientUsernameEntry *username_hash[USERNAME_HASH_SIZE] = {0};
+
+// Hash function for client IDs
+static size_t hash_client_id(uint64_t client_id) {
+    return client_id % USERNAME_HASH_SIZE;
+}
+
+// Structure to hold excluded usernames in a linked list
+typedef struct ExcludedUsernameNode {
+    char *username;
+    struct ExcludedUsernameNode *next;
+} ExcludedUsernameNode;
+
+// Global head of the linked list for excluded usernames
+static ExcludedUsernameNode *excluded_usernames_head = NULL;
+
+/////   Section for excluded usernames list functions  /////
+// Free the entire excluded usernames list
+void freeExcludedUsernames() {
+    ExcludedUsernameNode *current = excluded_usernames_head;
+    while (current != NULL) {
+        ExcludedUsernameNode *next = current->next;
+        free(current->username);
+        free(current);
+        current = next;
+    }
+    excluded_usernames_head = NULL;
+}
+
+// Check if a username is in the excluded list
+int isUsernameExcluded(const char *username) {
+    if (username == NULL) {
+        return 0;
+    }
+
+    if (excluded_usernames_head == NULL) return 0;
+    
+    // Use case-insensitive comparison to ensure consistency
+    ExcludedUsernameNode *current = excluded_usernames_head;
+    while (current != NULL) {
+        if (strcasecmp(current->username, username) == 0) {
+            return 1;
+        }
+        current = current->next;
+    }
+    return 0;
+}
+
+// Add a username to the excluded list
+void addExcludedUsername(const char *username) {
+    // Don't add if it's already in the list
+    if (isUsernameExcluded(username)) return;
+    
+    ExcludedUsernameNode *new_node = (ExcludedUsernameNode*)malloc(sizeof(ExcludedUsernameNode));
+    if (new_node == NULL) return;  // Out of memory
+    
+    new_node->username = strdup(username);
+    if (new_node->username == NULL) {
+        free(new_node);
+        return;  // Out of memory
+    }
+    
+    // Add at the beginning of the list
+    new_node->next = excluded_usernames_head;
+    excluded_usernames_head = new_node;
+}
+
+// Parse the comma-separated list and update the excluded usernames list
+void updateExcludedUsernames(const char *csv_list) {
+    // Clear previous entries
+    freeExcludedUsernames();
+    
+    // If empty list, just return
+    if (csv_list == NULL || *csv_list == '\0') return;
+    
+    // Make a copy of the list so we can modify it
+    char *list_copy = strdup(csv_list);
+    if (list_copy == NULL) return;
+    
+    // Parse the comma-separated values
+    char *token = strtok(list_copy, ",");
+    while (token != NULL) {
+        // Trim whitespace
+        while (*token == ' ') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && *end == ' ') *end-- = '\0';
+        
+        // Add to list if not empty
+        if (*token != '\0') {
+            addExcludedUsername(token);
+        }
+        
+        token = strtok(NULL, ",");
+    }
+    
+    free(list_copy);
+}
+
+/////   Section for client hash table functions  /////
+// Find the entry for client_id in the clients hash table
+ClientUsernameEntry* getClientEntry(uint64_t client_id) {
+    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
+    ClientUsernameEntry *current = username_hash[hash_index];
+    
+    // Search the linked list for the client_id
+    while (current != NULL) {
+        if (current->client_id == client_id) {
+            return current;
+        }
+        current = current->next;
+    }
+    
+    return NULL; // Not found
+}
+
+// Get username for a client ID
+const char *getClientUsername(uint64_t client_id) {
+    size_t idx = hash_client_id(client_id);
+    
+    ClientUsernameEntry *entry = username_hash[idx];
+    while (entry) {
+        if (entry->client_id == client_id) {
+            return entry->username;
+        }
+        entry = entry->next;
+    }
+    
+    return NULL;  // Not found
+}
+
+// Add or update a client ID to username mapping
+// also set the no_audit flag if the username is to be excluded
+void storeClientUsername(uint64_t client_id, const char *username, int no_audit) {
+    // Allocate memory for the new entry
+    ClientUsernameEntry *entry = malloc(sizeof(ClientUsernameEntry));
+    if (entry == NULL) {
+        return;
+    }
+    
+    // Make a copy of the username
+    char *username_copy = strdup(username);
+    if (username_copy == NULL) {
+        // Handle strdup failure
+        free(entry);
+        return;
+    }
+    
+    // Initialize the entry
+    entry->client_id = client_id;
+    entry->username = username_copy;
+    entry->no_audit = no_audit;
+    entry->next = NULL;
+    
+    // Calculate hash value (using simple modulo hash)
+    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
+    
+    // Add to hash table with basic collision handling (linked list chaining)
+    if (username_hash[hash_index] == NULL) {
+        // First entry at this hash index
+        username_hash[hash_index] = entry;
+    } else {
+        // Collision - add to the beginning of the linked list
+        // Check if client_id already exists and update it instead
+        ClientUsernameEntry *current = username_hash[hash_index];
+        ClientUsernameEntry *prev = NULL;
+        
+        while (current != NULL) {
+            if (current->client_id == client_id) {
+                // Client ID already exists - update the entry
+                free(current->username);  // Free the old username
+                current->username = username_copy;
+                current->no_audit = no_audit;
+                free(entry);  // Free the unused entry
+                return;
+            }
+            prev = current;
+            current = current->next;
+        }
+        
+        // Add new entry to the end of the list
+        prev->next = entry;
+    }
+}
+
+// Remove a client ID from the hash table
+void removeClientUsername(uint64_t client_id) {
+    size_t idx = hash_client_id(client_id);
+    
+    ClientUsernameEntry *entry = username_hash[idx];
+    ClientUsernameEntry *prev = NULL;
+    
+    while (entry) {
+        if (entry->client_id == client_id) {
+            if (prev) {
+                prev->next = entry->next;
+            } else {
+                username_hash[idx] = entry->next;
+            }
+            free(entry->username);
+            free(entry);
+            return;
+        }
+        prev = entry;
+        entry = entry->next;
+    }
+}
+
+// Print the contents of the user hash table
+void printUserHashContents(ValkeyModuleCtx *ctx) {
+    char buffer[4096] = "User hash table contents:\n";
+    size_t offset = strlen(buffer);
+    size_t remaining = sizeof(buffer) - offset;
+    int empty = 1;
+
+    for (size_t i = 0; i < USERNAME_HASH_SIZE; i++) {
+        ClientUsernameEntry *entry = username_hash[i];
+        
+        while (entry && remaining > 0) {
+            int written = snprintf(buffer + offset, remaining, 
+                                  "Client ID: %llu, Username: %s, NoAudit: %d \n", 
+                                  (unsigned long long)entry->client_id, 
+                                  entry->username ? entry->username : "NULL",
+                                  entry->no_audit);
+            
+            if (written > 0 && (size_t)written < remaining) {
+                offset += written;
+                remaining -= written;
+                empty = 0;
+            } else {
+                // Buffer full
+                break;
+            }
+            
+            entry = entry->next;
+        }
+        
+        if (remaining <= 0) {
+            break;
+        }
+    }
+    
+    if (empty) {
+        strcat(buffer, "  (empty)\n");
+    }
+    
+    // Log the content through our audit message system
+    logAuditMessage(ctx, buffer);
+    
+    // Also output to server log for admin viewing
+    ValkeyModule_Log(ctx, "notice", "%s", buffer);
+}
+
+/////  Logging functions  /////
+/* Helper function to get formatted timestamp */
+static void getTimeStr(char *buffer, size_t size) {
+    time_t now = time(NULL);
+    struct tm *timeinfo = localtime(&now);
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", timeinfo);
+}
+
+/* Helper function to write audit log to file */
+static void writeToFile(const char *message) {
+    if (!config.log_file) return;
+    
+    FILE *f = fopen(config.log_file, "a");
+    if (!f) {
+        return;
+    }
+    
+    char timestamp[32];
+    getTimeStr(timestamp, sizeof(timestamp));
+    
+    fprintf(f, "[%s] %s\n", timestamp, message);
+    fclose(f);
+}
+
+/* Helper function to log an audit message */
+static void logAuditMessage(ValkeyModuleCtx *ctx, const char *message) {
+    /* Log to Valkey internal log for debugging */
+    ValkeyModule_Log(ctx, "notice", "CONNECTION AUDIT: %s", message);
+    
+    writeToFile(message);
+}
+
+/* Get client type string */
+static const char* getClientTypeStr(ValkeyModuleClientInfo *ci) {
+    if (ci->flags & (1ULL << 0)) return "normal";
+    if (ci->flags & (1ULL << 1)) return "replica";
+    if (ci->flags & (1ULL << 2)) return "pubsub";
+    /* Add more client types as needed */
+    return "unknown";
+}
+
+/////  Module commands  /////
+/* Command to get connection statistics */
+int GetConnectionStats_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    VALKEYMODULE_NOT_USED(argv);
+    
+    if (argc != 1) {
+        return ValkeyModule_WrongArity(ctx);
+    }
+    
+    ValkeyModule_ReplyWithArray(ctx, 5);
+    
+    /* Calculate uptime */
+    time_t now = time(NULL);
+    time_t uptime = now - stats.start_time;
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "total_connections");
+    ValkeyModule_ReplyWithLongLong(ctx, stats.total_connections);
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "active_connections");
+    ValkeyModule_ReplyWithLongLong(ctx, stats.active_connections);
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "auth_failures");
+    ValkeyModule_ReplyWithLongLong(ctx, stats.auth_failures);
+  
+    ValkeyModule_ReplyWithSimpleString(ctx, "uptime_seconds");
+    ValkeyModule_ReplyWithLongLong(ctx, uptime);
+    
+    return VALKEYMODULE_OK;
+}
+
+/* Command to configure the connection audit module */
+int ConfigConnectionAudit_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    if (argc < 2 || argc % 2 != 0) {
+        return ValkeyModule_WrongArity(ctx);
+    }
+    
+    for (int i = 1; i < argc; i += 2) {
+        const char *option = ValkeyModule_StringPtrLen(argv[i], NULL);
+        const char *value = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+        
+        if (strcasecmp(option, "log_auth_failures") == 0) {
+            config.log_auth_failures = atoi(value);
+        }
+        else if (strcasecmp(option, "log_file") == 0) {
+            if (config.log_file) {
+                ValkeyModule_Free(config.log_file);
+            }
+            config.log_file = ValkeyModule_Strdup(value);
+        }
+        else if (strcasecmp(option, "max_log_size") == 0) {
+            config.max_log_size = atoi(value);
+            if (config.max_log_size < 100) config.max_log_size = 100;
+        }
+        else {
+            return ValkeyModule_ReplyWithError(ctx, "ERR invalid option");
+        }
+    }
+    
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+/* Reset connection statistics */
+int ResetConnectionStats_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    VALKEYMODULE_NOT_USED(argv);
+    
+    if (argc != 1) {
+        return ValkeyModule_WrongArity(ctx);
+    }
+    
+    /* Keep active_connections as is, since that's current state */
+    int active = stats.active_connections;
+    
+    /* Reset stats */
+    memset(&stats, 0, sizeof(stats));
+    stats.active_connections = active;
+    stats.start_time = time(NULL);
+    
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+/* Command to get the current connection audit configuration */
+int GetConnectionAuditConfig_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    VALKEYMODULE_NOT_USED(argv);
+    
+    if (argc != 1) {
+        return ValkeyModule_WrongArity(ctx);
+    }
+    
+    /* Reply with a flat array of key-value pairs */
+    ValkeyModule_ReplyWithArray(ctx, 6);  /* 3 config parameters * 2 */
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "log_auth_failures");
+    ValkeyModule_ReplyWithLongLong(ctx, config.log_auth_failures);
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "max_log_size");
+    ValkeyModule_ReplyWithLongLong(ctx, config.max_log_size);
+    
+    ValkeyModule_ReplyWithSimpleString(ctx, "log_file");
+    if (config.log_file) {
+        ValkeyModule_ReplyWithSimpleString(ctx, config.log_file);
+    } else {
+        ValkeyModule_ReplyWithNull(ctx);
+    }
+    
+    return VALKEYMODULE_OK;
+}
+
+// Command handler for the AUDITUSERS command
+int AuditUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    VALKEYMODULE_NOT_USED(argv);
+    VALKEYMODULE_NOT_USED(argc);
+    
+    printUserHashContents(ctx);
+    
+    // Reply to client
+    ValkeyModule_ReplyWithSimpleString(ctx, "OK - user hash table dumped to logs");
+    
+    return VALKEYMODULE_OK;
+}
+
+/* Command to process the excluded users command */
+int AuditExcludeUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    if (argc == 1) {
+        // No arguments - return the current list
+        size_t bufsize = 1024;
+        char *buffer = malloc(bufsize);
+        if (buffer == NULL) {
+            ValkeyModule_ReplyWithError(ctx, "Out of memory");
+            return VALKEYMODULE_ERR;
+        }
+        
+        // Build comma-separated list
+        buffer[0] = '\0';
+        int first = 1;
+        ExcludedUsernameNode *current = excluded_usernames_head;
+        
+        while (current != NULL) {
+            size_t username_len = strlen(current->username);
+            size_t current_len = strlen(buffer);
+            
+            // Check if we need to resize the buffer
+            if (current_len + username_len + 2 >= bufsize) {
+                bufsize *= 2;
+                char *new_buffer = realloc(buffer, bufsize);
+                if (new_buffer == NULL) {
+                    free(buffer);
+                    ValkeyModule_ReplyWithError(ctx, "Out of memory");
+                    return VALKEYMODULE_ERR;
+                }
+                buffer = new_buffer;
+            }
+            
+            // Add comma if not the first item
+            if (!first) {
+                strcat(buffer, ", ");
+            } else {
+                first = 0;
+            }
+            
+            // Add the username
+            strcat(buffer, current->username);
+            current = current->next;
+        }
+        
+        ValkeyModuleString *reply = ValkeyModule_CreateString(ctx, buffer, strlen(buffer));
+        free(buffer);
+        
+        ValkeyModule_ReplyWithString(ctx, reply);
+        return VALKEYMODULE_OK;
+    } else if (argc == 2) {
+        // Set new list
+        const char *new_list = ValkeyModule_StringPtrLen(argv[1], NULL);
+        updateExcludedUsernames(new_list);
+        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return VALKEYMODULE_OK;
+    } else {
+        return ValkeyModule_WrongArity(ctx);
+    }
+}
+
+/////  Callback functions  /////
+/* Client state change callback. */
+void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
+    VALKEYMODULE_NOT_USED(e);
+
+    ValkeyModuleClientInfo *ci = data;
+    const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ? 
+                             "connection" : "disconnection";
+    
+    // Buffer for the audit message
+    char buffer[1024];
+    const char *username = "default"; // Default value
+    char *temp_username = NULL;       // For tracking allocated memory
+    
+    if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) {
+        // Client connected - get and store username
+        ValkeyModuleString *user_str = ValkeyModule_GetClientUserNameById(ctx, ci->id);
+
+        if (user_str != NULL) {
+            size_t user_len;
+            const char *user_ptr = ValkeyModule_StringPtrLen(user_str, &user_len);
+
+            // Make a temporary copy for our use in this function
+            temp_username = malloc(user_len + 1);
+            if (temp_username == NULL) {
+                // Handle memory allocation failure
+                ValkeyModule_Log(ctx, "warning", "Failed to allocate memory for username");
+                ValkeyModule_FreeString(ctx, user_str);
+                return; // Or some other error handling
+            }
+            
+            strncpy(temp_username, user_ptr, user_len);
+            temp_username[user_len] = '\0'; // Null-terminate the copy
+            username = temp_username;       // Use our copy for the audit message
+
+            // Check if username is in the excluded list
+            int no_audit = isUsernameExcluded(username);
+            
+            // Store username in hash table - storeClientUsername makes its own copy
+            storeClientUsername(ci->id, username, no_audit);
+
+            ValkeyModule_FreeString(ctx, user_str);
+        } else {
+            // Handle error cases
+            if (errno == ENOENT) {
+                username = "non-existent-client";
+            } else if (errno == ENOTSUP) {
+                username = "no-acl-user";
+            } else {
+                // Default case for other errors
+                username = "unknown-error";
+                ValkeyModule_Log(ctx, "warning", "Unknown error getting client username: %d", errno);
+            }
+
+            // Store placeholder in hash table
+            storeClientUsername(ci->id, username, 0);
+        }
+    } else if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED) {
+        // For disconnection, make a copy of the username from the hash
+        const char *stored_username = getClientUsername(ci->id);
+        if (stored_username != NULL) {
+            // Make a copy of the username before we remove it from the hash
+            temp_username = strdup(stored_username);
+            if (temp_username != NULL) {
+                username = temp_username;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Failed to allocate memory for username during disconnection");
+                username = "memory-error";
+            }
+        } else {
+            username = "unknown"; // Fallback if not found in hash
+        }
+        
+        // Client disconnected - remove from hash table
+        removeClientUsername(ci->id);
+    }
+    
+    // Format the audit message with username information
+    snprintf(buffer, sizeof(buffer), 
+             "Client %s event for client #%llu %s:%d using username: %s type %s",
+             event_type, 
+             (unsigned long long)ci->id, 
+             ci->addr, 
+             ci->port, 
+             username,
+             getClientTypeStr(ci)
+            );
+    
+    // Log the message
+    logAuditMessage(ctx, buffer);
+    
+    // Clean up our temporary memory
+    if (temp_username != NULL) {
+        free(temp_username);
+    }
+}
+
+int auth_logger_callback(ValkeyModuleCtx *ctx, ValkeyModuleString *username, 
+    ValkeyModuleString *password, ValkeyModuleString **err) {
+
+    VALKEYMODULE_NOT_USED(password);
+    VALKEYMODULE_NOT_USED(err);
+
+    // Extract username
+    size_t username_len;
+    const char *username_str = ValkeyModule_StringPtrLen(username, &username_len);
+
+    // Get client information
+    uint64_t client_id = ValkeyModule_GetClientId(ctx);
+    char client_info[256] = "unknown";
+
+    // Try to get client info if available
+    ValkeyModuleClientInfo client = VALKEYMODULE_CLIENTINFO_INITIALIZER_V1;
+    if (ValkeyModule_GetClientInfoById( &client_id, client_id) == VALKEYMODULE_OK) {
+        snprintf(client_info, sizeof(client_info), "%s:%d", client.addr, client.port);
+    }
+
+    // Format audit message for auth attempt
+    char buffer[1024];
+    snprintf(buffer, sizeof(buffer), 
+                "Authentication attempt for username: %s from client #%llu (%s)",
+                 username_str, (unsigned long long)client_id, client_info);
+
+    // Log the auth attempt
+    logAuditMessage(ctx, buffer);
+
+    // Update the username in our hash table if the auth will succeed
+    // We don't know yet if it will succeed, but we store it anyway and let
+    // the normal AUTH mechanism decide
+    // First check if username is in the excluded list and store
+    int no_audit = isUsernameExcluded(username_str);
+    storeClientUsername(client_id, username_str, no_audit);
+
+    // We're just logging, not making auth decisions, so pass through
+    return VALKEYMODULE_AUTH_NOT_HANDLED;
+}
+
+void command_logger_callback(ValkeyModuleCommandFilterCtx *filter)
+{
+   // Get client info
+   unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
+   int no_audit = 0;
+   ClientUsernameEntry *entry = getClientEntry(client);
+
+   // Check if this user is excluded from being audited
+   if (entry != NULL) {
+      // Get the no_audit flag directly from the stored entry
+      no_audit = entry->no_audit;
+   }
+   if (no_audit) return;  
+
+   // Buffer for the audit message
+   char buffer[1024];
+   char cmd[256] = ""; // what about LUA and the length?
+
+   int log = 1;
+   int pos = 0;
+   const ValkeyModuleString *arg = ValkeyModule_CommandFilterArgGet(filter, pos);
+   size_t arg_len;
+   const char *arg_str = ValkeyModule_StringPtrLen(arg, &arg_len);
+   strcat(cmd, arg_str);
+
+   if (client) {
+       snprintf(buffer, sizeof(buffer), "Client %llu executed command: %s", 
+                client, cmd[0] ? cmd : "unknown");
+   } else {
+       snprintf(buffer, sizeof(buffer), "Client executed command: %s", 
+                cmd[0] ? cmd : "unknown");
+   }
+        
+   // Log the message
+   //logAuditMessageDirect(buffer);
+   if (log) 
+       printf("cmd: %s\n", buffer);
+
+}
+
+/////  Module init and shutdown  /////
+
+static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    // Set default file path
+    config.file_path = strdup("/var/log/valkey/audit.log");
+    
+    // Process module arguments if any
+    for (int i = 0; i < argc; i++) {
+        size_t arglen;
+        const char *arg = ValkeyModule_StringPtrLen(argv[i], &arglen);
+        
+        // Handle protocol argument
+        if (i < argc-1 && strcasecmp(arg, "protocol") == 0) {
+            const char *protocol = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            if (strcasecmp(protocol, "file") == 0) {
+                config.protocol = PROTOCOL_FILE;
+            } else if (strcasecmp(protocol, "syslog") == 0) {
+                config.protocol = PROTOCOL_SYSLOG;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown protocol '%s', using default", protocol);
+            }
+        }
+        // Handle logfile argument
+        else if (i < argc-1 && strcasecmp(arg, "logfile") == 0) {
+            const char *logfile = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            if (config.file_path) {
+                free(config.file_path);
+            }
+            config.file_path = strdup(logfile);
+        }
+        // Handle format argument
+        else if (i < argc-1 && strcasecmp(arg, "format") == 0) {
+            const char *format = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            if (strcasecmp(format, "text") == 0) {
+                config.format = FORMAT_TEXT;
+            } else if (strcasecmp(format, "json") == 0) {
+                config.format = FORMAT_JSON;
+            } else if (strcasecmp(format, "csv") == 0) {
+                config.format = FORMAT_CSV;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown format '%s', using default", format);
+            }
+        }
+        // Handle syslog facility argument
+        else if (i < argc-1 && strcasecmp(arg, "syslog-facility") == 0) {
+            const char *facility = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            if (strcasecmp(facility, "local0") == 0) config.syslog_facility = LOG_LOCAL0;
+            else if (strcasecmp(facility, "local1") == 0) config.syslog_facility = LOG_LOCAL1;
+            else if (strcasecmp(facility, "local2") == 0) config.syslog_facility = LOG_LOCAL2;
+            else if (strcasecmp(facility, "local3") == 0) config.syslog_facility = LOG_LOCAL3;
+            else if (strcasecmp(facility, "local4") == 0) config.syslog_facility = LOG_LOCAL4;
+            else if (strcasecmp(facility, "local5") == 0) config.syslog_facility = LOG_LOCAL5;
+            else if (strcasecmp(facility, "local6") == 0) config.syslog_facility = LOG_LOCAL6;
+            else if (strcasecmp(facility, "local7") == 0) config.syslog_facility = LOG_LOCAL7;
+            else if (strcasecmp(facility, "user") == 0) config.syslog_facility = LOG_USER;
+            else if (strcasecmp(facility, "daemon") == 0) config.syslog_facility = LOG_DAEMON;
+            else {
+                ValkeyModule_Log(ctx, "warning", "Unknown syslog facility '%s', using default", facility);
+            }
+        }
+        // Handle events argument
+        else if (i < argc-1 && strcasecmp(arg, "events") == 0) {
+            const char *events = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            // Parse comma-separated event list
+            config.event_mask = 0;  // Reset events
+            
+            char *events_copy = strdup(events);
+            char *token = strtok(events_copy, ",");
+            
+            while (token != NULL) {
+                if (strcasecmp(token, "connections") == 0) {
+                    config.event_mask |= EVENT_CONNECTIONS;
+                } else if (strcasecmp(token, "auth") == 0) {
+                    config.event_mask |= EVENT_AUTH;
+                } else if (strcasecmp(token, "config") == 0) {
+                    config.event_mask |= EVENT_CONFIG;
+                } else if (strcasecmp(token, "keys") == 0) {
+                    config.event_mask |= EVENT_KEYS;
+                } else if (strcasecmp(token, "all") == 0) {
+                    config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
+                } else if (strcasecmp(token, "none") == 0) {
+                    config.event_mask = 0;
+                } else {
+                    ValkeyModule_Log(ctx, "warning", "Unknown event type '%s', ignoring", token);
+                }
+                
+                token = strtok(NULL, ",");
+            }
+            
+            free(events_copy);
+        }
+        // Handle disable-payload argument
+        else if (strcasecmp(arg, "disable-payload") == 0) {
+            config.disable_payload = 1;
+        }
+        // Handle max-payload-size argument
+        else if (i < argc-1 && strcasecmp(arg, "max-payload-size") == 0) {
+            const char *size_str = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            char *endptr;
+            long size = strtol(size_str, &endptr, 10);
+            
+            if (*endptr != '\0' || size < 0) {
+                ValkeyModule_Log(ctx, "warning", "Invalid payload size '%s', using default", size_str);
+            } else {
+                config.max_payload_size = (size_t)size;
+            }
+        }
+    }
+    
+    // Open log file if using file protocol
+    if (config.protocol == PROTOCOL_FILE && config.file_path) {
+        config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (config.file_fd == -1) {
+            ValkeyModule_Log(ctx, "warning", "Failed to open audit log file: %s", config.file_path);
+            return VALKEYMODULE_ERR;
+        }
+    }
+    
+    // Initialize syslog if using syslog protocol
+    if (config.protocol == PROTOCOL_SYSLOG) {
+        openlog("valkey-audit", LOG_PID, config.syslog_facility);
+    }
+    
+    // Register for client connection/disconnection events
+    if (ValkeyModule_RegisterEvent(ctx, VALKEYMODULE_EVENT_CLIENT_CONNECTED, 
+                                 connectionEventCallback) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    if (ValkeyModule_RegisterEvent(ctx, VALKEYMODULE_EVENT_CLIENT_DISCONNECTED, 
+                                 connectionEventCallback) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Register for authentication events
+    if (ValkeyModule_RegisterEvent(ctx, VALKEYMODULE_EVENT_AUTHENTICATION, 
+                                 authEventCallback) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Register command filter for auditing commands
+    if (ValkeyModule_RegisterCommandFilter(ctx, commandFilterCallback) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    return VALKEYMODULE_OK;
+}
+
+/* Register the commands into the Valkey server, connection callback and command filter. */
+int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    if (ValkeyModule_Init(ctx,"audit",1,VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR) 
+        return VALKEYMODULE_ERR;
+
+    // Initialize the audit module with passed arguments
+    if (initAuditModule(ctx, argv, argc) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }  
+    
+    /* Initialize stats */
+    stats.start_time = time(NULL);
+
+    // Initialize hash table for client usernames
+    for (int i = 0; i < USERNAME_HASH_SIZE; i++) {
+        username_hash[i] = NULL;
+    }
+
+    /* Register commands */
+    // Register audit.setprotocol command
+    if (ValkeyModule_CreateCommand(ctx, "audit.setprotocol",
+            auditSetProtocol_ValkeyCommand,
+            "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    // Register audit.setformat command
+    if (ValkeyModule_CreateCommand(ctx, "audit.setformat",
+                auditSetFormat_ValkeyCommand,
+                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    return VALKEYMODULE_ERR;
+    }
+
+    // Register audit.setevents command
+    if (ValkeyModule_CreateCommand(ctx, "audit.setevents",
+                auditSetEvents_ValkeyCommand,
+                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    return VALKEYMODULE_ERR;
+    }
+
+    // Register audit.setpayloadoptions command
+    if (ValkeyModule_CreateCommand(ctx, "audit.setpayloadoptions",
+                auditSetPayloadOptions_ValkeyCommand,
+                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    return VALKEYMODULE_ERR;
+    }
+
+    // Register audit.getconfig command
+    if (ValkeyModule_CreateCommand(ctx, "audit.getconfig",
+                auditGetConfig_ValkeyCommand,
+                "admin readonly", 0, 0, 0) == VALKEYMODULE_ERR) {
+    return VALKEYMODULE_ERR;
+
+    // Register the AUDITUSERS command
+    if (ValkeyModule_CreateCommand(ctx, "auditusers", 
+            AuditUsersCommand,
+            "admin no-cluster", 0, 0, 0) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Register command to set excluded users list
+    if (ValkeyModule_CreateCommand(ctx, "auditexcludeusers", 
+             AuditExcludeUsersCommand, 
+            "admin no-cluster", 1, 0, 0) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    /* Subscribe to client connection/disconnection events */
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+        ValkeyModuleEvent_ClientChange, clientChangeCallback) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+
+    // Register the auth callback
+    ValkeyModule_RegisterAuthCallback(ctx, auth_logger_callback);
+
+    // Register our command filter callback
+    if ((filter = ValkeyModule_RegisterCommandFilter(ctx, command_logger_callback, 
+        VALKEYMODULE_CMDFILTER_NOSELF))== NULL) 
+        return VALKEYMODULE_ERR;    
+
+    return VALKEYMODULE_OK;
+
+}
+
+/* Clean up when module is unloaded */
+int ValkeyModule_OnUnload(ValkeyModuleCtx *ctx) {
+    VALKEYMODULE_NOT_USED(ctx);
+    
+    if (config.log_file) {
+        ValkeyModule_Free(config.log_file);
+    }
+    
+    return VALKEYMODULE_OK;
+}

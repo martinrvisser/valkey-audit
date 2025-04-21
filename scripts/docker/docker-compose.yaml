@@ -1,0 +1,15 @@
+name: valkey-audit
+services:
+
+  valkey:
+    build:
+      dockerfile: Dockerfile-valkey-audit
+      context: ./
+    image: valkey-audit
+    container_name: valkey
+    command: valkey-server /valkey-audit/valkey.conf
+    ports:
+        - 6379:6379
+    volumes:
+        - ../../build:/valkey-audit
+        - ../../test:/test
