@@ -2,3 +2,5 @@
 .cache
 build
 **/__pycache__
+test/unit/dump.rdb
+test/unit/audit.log
