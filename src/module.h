@@ -23,6 +23,7 @@
 #define FORMAT_CSV 2
 
 typedef struct AuditConfig {
+    int enabled;
     int protocol;
     int format;
     int event_mask;

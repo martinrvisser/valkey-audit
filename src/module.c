@@ -11,25 +11,27 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 
 static AuditConfig config = {
+    .enabled = 1,
     .protocol = PROTOCOL_FILE,
     .format = FORMAT_TEXT,
     .event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS,
     .disable_payload = 0,
     .max_payload_size = 1024,
-    .file_path = NULL,
+    .file_path = "audit.log",
     .syslog_facility = LOG_LOCAL0,
     .syslog_priority = LOG_NOTICE,
     .file_fd = -1
 };
 
 // Forward declarations
-static int auditSetProtocol_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-static int auditSetFormat_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-static int auditSetEvents_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-static int auditSetPayloadOptions_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-static int auditGetConfig_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
+//static int auditSetProtocol_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
+//static int auditSetFormat_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
+//static int auditSetEvents_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
+//static int auditSetPayloadOptions_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
+//static int auditGetConfig_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
 
 static ValkeyModuleCommandFilter *filter;
 static ConnectionStats stats = {0};
@@ -572,151 +574,290 @@ static void logAuditEvent(const char *category, const char *command, const char 
     writeAuditLog("%s", buffer);
 }
 
-/////  Module commands  /////
-// Command implementation: audit.setprotocol
-static int auditSetProtocol_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 3) {
-        return ValkeyModule_WrongArity(ctx);
+/////  Module config  /////
+// Get the protocol configuration string
+ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    const char *protocol_str = NULL;
+    const char *param_str = NULL;
+    char *combined_str = NULL;
+    size_t len = 0;
+    
+    // Determine protocol string based on the config struct
+    switch(config.protocol) {
+        case PROTOCOL_FILE:
+            protocol_str = "file";
+            param_str = config.file_path ? config.file_path : "";
+            break;
+        case PROTOCOL_SYSLOG:
+            protocol_str = "syslog";
+            // Convert facility number to string
+            switch(config.syslog_facility) {
+                case LOG_LOCAL0: param_str = "local0"; break;
+                case LOG_LOCAL1: param_str = "local1"; break;
+                case LOG_LOCAL2: param_str = "local2"; break;
+                case LOG_LOCAL3: param_str = "local3"; break;
+                case LOG_LOCAL4: param_str = "local4"; break;
+                case LOG_LOCAL5: param_str = "local5"; break;
+                case LOG_LOCAL6: param_str = "local6"; break;
+                case LOG_LOCAL7: param_str = "local7"; break;
+                case LOG_USER: param_str = "user"; break;
+                case LOG_DAEMON: param_str = "daemon"; break;
+                default: param_str = "unknown"; break;
+            }
+            break;
+        default:
+            protocol_str = "unknown";
+            param_str = "";
     }
+    
+    // Format as "protocol param"
+    len = strlen(protocol_str) + strlen(param_str) + 2; // +1 for space, +1 for null terminator
+    combined_str = ValkeyModule_Alloc(len);
+    if (combined_str) {
+        snprintf(combined_str, len, "%s %s", protocol_str, param_str);
+        ValkeyModuleString *result = ValkeyModule_CreateString(NULL, combined_str, strlen(combined_str));
+        ValkeyModule_Free(combined_str);
+        return result;
+    }
+    
+    // Fallback if allocation fails
+    return ValkeyModule_CreateString(NULL, protocol_str, strlen(protocol_str));
+}
+
+int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
     
     size_t len;
-    const char *protocol = ValkeyModule_StringPtrLen(argv[1], &len);
-    const char *param = ValkeyModule_StringPtrLen(argv[2], &len);
+    const char *input = ValkeyModule_StringPtrLen(new_val, &len);
     
-    // Close existing protocol handlers
-    if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
-        close(config.file_fd);
-        config.file_fd = -1;
-    } else if (config.protocol == PROTOCOL_SYSLOG) {
-        closelog();
-    }
-    
-    if (strcasecmp(protocol, "file") == 0) {
-        // Free previous path if it exists
-        if (config.file_path) {
-            free(config.file_path);
+    // Process based on protocol type
+    if (strncasecmp(input, "file ", 5) == 0) {
+        const char *filepath = input + 5;
+        
+        // Close existing connections
+        if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
+            close(config.file_fd);
+            config.file_fd = -1;
+        } else if (config.protocol == PROTOCOL_SYSLOG) {
+            closelog();
         }
         
+        // Free existing file_path if any
+        if (config.file_path) {
+            free(config.file_path); // Use free() if the original was allocated with strdup/malloc
+            config.file_path = NULL;
+        }
+        
+        // Create a new copy of the filepath
+        config.file_path = strdup(filepath); // Use strdup if original used malloc/strdup
+        if (!config.file_path) {
+            *err = ValkeyModule_CreateString(NULL, "ERR Memory allocation failed", 27);
+            return VALKEYMODULE_ERR;
+        }
+        
+        // Update config
         config.protocol = PROTOCOL_FILE;
-        config.file_path = strdup(param);
         
         // Open the file
         config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
         if (config.file_fd == -1) {
-            ValkeyModule_ReplyWithError(ctx, "ERR Failed to open audit log file");
-            return VALKEYMODULE_OK;
+            *err = ValkeyModule_CreateString(NULL, "ERR Failed to open audit log file", 32);
+            return VALKEYMODULE_ERR;
         }
         
-        logAuditEvent("AUDIT", "SET_PROTOCOL", "protocol=file");
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-    } else if (strcasecmp(protocol, "syslog") == 0) {
-        config.protocol = PROTOCOL_SYSLOG;
+        return VALKEYMODULE_OK;
+    } 
+    else if (strncasecmp(input, "syslog ", 7) == 0) {
+        const char *facility_str = input + 7;
+        int facility = LOG_LOCAL0;  // Default
         
-        // Parse syslog facility
-        if (strcasecmp(param, "local0") == 0) config.syslog_facility = LOG_LOCAL0;
-        else if (strcasecmp(param, "local1") == 0) config.syslog_facility = LOG_LOCAL1;
-        else if (strcasecmp(param, "local2") == 0) config.syslog_facility = LOG_LOCAL2;
-        else if (strcasecmp(param, "local3") == 0) config.syslog_facility = LOG_LOCAL3;
-        else if (strcasecmp(param, "local4") == 0) config.syslog_facility = LOG_LOCAL4;
-        else if (strcasecmp(param, "local5") == 0) config.syslog_facility = LOG_LOCAL5;
-        else if (strcasecmp(param, "local6") == 0) config.syslog_facility = LOG_LOCAL6;
-        else if (strcasecmp(param, "local7") == 0) config.syslog_facility = LOG_LOCAL7;
-        else if (strcasecmp(param, "user") == 0) config.syslog_facility = LOG_USER;
-        else if (strcasecmp(param, "daemon") == 0) config.syslog_facility = LOG_DAEMON;
+        // Simple facility mapping
+        if (strcasecmp(facility_str, "local0") == 0) facility = LOG_LOCAL0;
+        else if (strcasecmp(facility_str, "local1") == 0) facility = LOG_LOCAL1;
+        else if (strcasecmp(facility_str, "local2") == 0) facility = LOG_LOCAL2;
+        else if (strcasecmp(facility_str, "local3") == 0) facility = LOG_LOCAL3;
+        else if (strcasecmp(facility_str, "local4") == 0) facility = LOG_LOCAL4;
+        else if (strcasecmp(facility_str, "local5") == 0) facility = LOG_LOCAL5;
+        else if (strcasecmp(facility_str, "local6") == 0) facility = LOG_LOCAL6;
+        else if (strcasecmp(facility_str, "local7") == 0) facility = LOG_LOCAL7;
+        else if (strcasecmp(facility_str, "user") == 0) facility = LOG_USER;
+        else if (strcasecmp(facility_str, "daemon") == 0) facility = LOG_DAEMON;
         else {
-            ValkeyModule_ReplyWithError(ctx, "ERR Invalid syslog facility");
-            return VALKEYMODULE_OK;
+            *err = ValkeyModule_CreateString(NULL, "ERR Invalid syslog facility", 27);
+            return VALKEYMODULE_ERR;
         }
+        
+        // Close existing connections
+        if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
+            close(config.file_fd);
+            config.file_fd = -1;
+        } else if (config.protocol == PROTOCOL_SYSLOG) {
+            closelog();
+        }
+        
+        // Free existing file_path if any
+        if (config.file_path) {
+            free(config.file_path);
+            config.file_path = NULL;
+        }
+        
+        // Update config
+        config.protocol = PROTOCOL_SYSLOG;
+        config.syslog_facility = facility;
         
         // Initialize syslog
         openlog("valkey-audit", LOG_PID, config.syslog_facility);
         
-        logAuditEvent("AUDIT", "SET_PROTOCOL", "protocol=syslog");
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-    } else {
-        ValkeyModule_ReplyWithError(ctx, "ERR Unknown protocol. Use 'file' or 'syslog'");
+        return VALKEYMODULE_OK;
+    } 
+    else {
+        *err = ValkeyModule_CreateString(NULL, "ERR Unknown protocol. Use 'file <path>' or 'syslog <facility>'", 64);
+        return VALKEYMODULE_ERR;
     }
-    
-    return VALKEYMODULE_OK;
 }
 
-// Command implementation: audit.setformat
-static int auditSetFormat_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 2) {
-        return ValkeyModule_WrongArity(ctx);
+// Format config get function
+ValkeyModuleString *getAuditFormat(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    const char *formatString;
+    
+    // Use the format from the config struct
+    switch(config.format) {
+        case FORMAT_TEXT:
+            formatString = "text";
+            break;
+        case FORMAT_JSON:
+            formatString = "json";
+            break;
+        case FORMAT_CSV:
+            formatString = "csv";
+            break;
+        default:
+            formatString = "unknown";
     }
     
+    return ValkeyModule_CreateString(NULL, formatString, strlen(formatString));
+}
+
+// Format config set function
+int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
     size_t len;
-    const char *format = ValkeyModule_StringPtrLen(argv[1], &len);
+    const char *format = ValkeyModule_StringPtrLen(new_val, &len);
     
     if (strcasecmp(format, "text") == 0) {
         config.format = FORMAT_TEXT;
         logAuditEvent("AUDIT", "SET_FORMAT", "format=text");
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "json") == 0) {
         config.format = FORMAT_JSON;
         logAuditEvent("AUDIT", "SET_FORMAT", "format=json");
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "csv") == 0) {
         config.format = FORMAT_CSV;
         logAuditEvent("AUDIT", "SET_FORMAT", "format=csv");
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+        return VALKEYMODULE_OK;
     } else {
-        ValkeyModule_ReplyWithError(ctx, "ERR Unknown format. Use 'text', 'json', or 'csv'");
+        // Create error message
+        *err = ValkeyModule_CreateString(NULL, "ERR Unknown format. Use 'text', 'json', or 'csv'", 48);
+        return VALKEYMODULE_ERR;
     }
-    
-    return VALKEYMODULE_OK;
 }
 
 // Command implementation: audit.setevents
-static int auditSetEvents_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc < 2) {
-        return ValkeyModule_WrongArity(ctx);
-    }
+// Get the events configuration
+ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    char event_str[256] = "";
     
-    // If exactly 2 arguments and the second one is "all" or "none"
-    if (argc == 2) {
-        size_t len;
-        const char *param = ValkeyModule_StringPtrLen(argv[1], &len);
+    // Build string based on the event mask from config
+    if (config.event_mask == 0) {
+        strcpy(event_str, "none");
+    } else if (config.event_mask == (EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS)) {
+        strcpy(event_str, "all");
+    } else {
+        if (config.event_mask & EVENT_CONNECTIONS) strcat(event_str, "connections,");
+        if (config.event_mask & EVENT_AUTH) strcat(event_str, "auth,");
+        if (config.event_mask & EVENT_CONFIG) strcat(event_str, "config,");
+        if (config.event_mask & EVENT_KEYS) strcat(event_str, "keys,");
         
-        if (strcasecmp(param, "all") == 0) {
-            config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
-            logAuditEvent("AUDIT", "SET_EVENTS", "events=all");
-            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-            return VALKEYMODULE_OK;
-        } else if (strcasecmp(param, "none") == 0) {
-            config.event_mask = 0;
-            logAuditEvent("AUDIT", "SET_EVENTS", "events=none");
-            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-            return VALKEYMODULE_OK;
+        // Remove trailing comma
+        if (strlen(event_str) > 0) {
+            event_str[strlen(event_str) - 1] = '\0';
         }
     }
     
-    // Otherwise, process individual event types
+    return ValkeyModule_CreateString(NULL, event_str, strlen(event_str));
+}
+
+int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    size_t len;
+    const char *events_input = ValkeyModule_StringPtrLen(new_val, &len);
+    
+    // Allocate space for parsing
+    char *events_copy = ValkeyModule_Alloc(len + 1);
+    if (!events_copy) {
+        *err = ValkeyModule_CreateString(NULL, "ERR Memory allocation failed", 27);
+        return VALKEYMODULE_ERR;
+    }
+    memcpy(events_copy, events_input, len);
+    events_copy[len] = '\0';
+    
+    // Process special keywords "all" or "none"
+    if (strcasecmp(events_copy, "all") == 0) {
+        config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
+        logAuditEvent("AUDIT", "SET_EVENTS", "events=all");
+        ValkeyModule_Free(events_copy);
+        return VALKEYMODULE_OK;
+    } else if (strcasecmp(events_copy, "none") == 0) {
+        config.event_mask = 0;
+        logAuditEvent("AUDIT", "SET_EVENTS", "events=none");
+        ValkeyModule_Free(events_copy);
+        return VALKEYMODULE_OK;
+    }
+    
+    // Otherwise, process individual event types separated by commas
     int new_mask = 0;
     char event_str[256] = "";
+    char *token, *saveptr;
     
-    for (int i = 1; i < argc; i++) {
-        size_t len;
-        const char *event = ValkeyModule_StringPtrLen(argv[i], &len);
+    token = strtok_r(events_copy, ",", &saveptr);
+    while (token) {
+        // Trim leading and trailing spaces
+        while (*token == ' ') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && *end == ' ') *end-- = '\0';
         
-        if (strcasecmp(event, "connections") == 0) {
+        if (strcasecmp(token, "connections") == 0) {
             new_mask |= EVENT_CONNECTIONS;
             strcat(event_str, "connections,");
-        } else if (strcasecmp(event, "auth") == 0) {
+        } else if (strcasecmp(token, "auth") == 0) {
             new_mask |= EVENT_AUTH;
             strcat(event_str, "auth,");
-        } else if (strcasecmp(event, "config") == 0) {
+        } else if (strcasecmp(token, "config") == 0) {
             new_mask |= EVENT_CONFIG;
             strcat(event_str, "config,");
-        } else if (strcasecmp(event, "keys") == 0) {
+        } else if (strcasecmp(token, "keys") == 0) {
             new_mask |= EVENT_KEYS;
             strcat(event_str, "keys,");
         } else {
-            ValkeyModule_ReplyWithError(ctx, 
-                "ERR Unknown event type. Use 'connections', 'auth', 'config', or 'keys'");
-            return VALKEYMODULE_OK;
+            ValkeyModule_Free(events_copy);
+            char error_msg[100];
+            snprintf(error_msg, sizeof(error_msg), 
+                     "ERR Unknown event type '%s'. Use 'connections', 'auth', 'config', or 'keys'", token);
+            *err = ValkeyModule_CreateString(NULL, error_msg, strlen(error_msg));
+            return VALKEYMODULE_ERR;
         }
+        
+        token = strtok_r(NULL, ",", &saveptr);
     }
     
     // Remove trailing comma
@@ -730,53 +871,134 @@ static int auditSetEvents_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString
     snprintf(details, sizeof(details), "events=%s", event_str);
     logAuditEvent("AUDIT", "SET_EVENTS", details);
     
-    ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    ValkeyModule_Free(events_copy);
     return VALKEYMODULE_OK;
 }
 
 // Command implementation: audit.setpayloadoptions
-static int auditSetPayloadOptions_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 3) {
-        return ValkeyModule_WrongArity(ctx);
+// Get the payload disable configuration
+int getAuditPayloadDisable(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    return config.disable_payload;
+}
+
+// Set the payload disable configuration
+int setAuditPayloadDisable(const char *name, int new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
+    config.disable_payload = new_val;
+    
+    char details[32];
+    snprintf(details, sizeof(details), "disable=%s", new_val ? "yes" : "no");
+    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details);
+    
+    return VALKEYMODULE_OK;
+}
+
+// Get the payload maxsize configuration
+long long getAuditPayloadMaxSize(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    return config.max_payload_size;
+}
+
+// Set the payload maxsize configuration
+int setAuditPayloadMaxSize(const char *name, long long new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    if (new_val < 0) {
+        *err = ValkeyModule_CreateString(NULL, "ERR Invalid size. Must be a positive number", 44);
+        return VALKEYMODULE_ERR;
     }
+    
+    config.max_payload_size = (size_t)new_val;
+    
+    char details[64];
+    snprintf(details, sizeof(details), "maxsize=%zu", config.max_payload_size);
+    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details);
+    
+    return VALKEYMODULE_OK;
+}
+
+int getAuditEnabled(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    return config.enabled;
+}
+
+int setAuditEnabled(const char *name, int new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
+    config.enabled = new_val;
+    return VALKEYMODULE_OK;
+}
+
+ValkeyModuleString *getAuditExcludeUsers(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    size_t bufsize = 1024;
+    char *buffer = malloc(bufsize);
+    if (buffer == NULL) {
+        return ValkeyModule_CreateString(NULL, "", 0);
+    }
+    
+    // Build comma-separated list
+    buffer[0] = '\0';
+    int first = 1;
+    ExcludedUsernameNode *current = excluded_usernames_head;
+    
+    while (current != NULL) {
+        size_t username_len = strlen(current->username);
+        size_t current_len = strlen(buffer);
+        
+        // Check if we need to resize the buffer
+        if (current_len + username_len + 2 >= bufsize) {
+            bufsize *= 2;
+            char *new_buffer = realloc(buffer, bufsize);
+            if (new_buffer == NULL) {
+                free(buffer);
+                return ValkeyModule_CreateString(NULL, "", 0);
+            }
+            buffer = new_buffer;
+        }
+        
+        // Add comma if not the first item
+        if (!first) {
+            strcat(buffer, ",");
+        } else {
+            first = 0;
+        }
+        
+        // Add the username
+        strcat(buffer, current->username);
+        current = current->next;
+    }
+    
+    ValkeyModuleString *result = ValkeyModule_CreateString(NULL, buffer, strlen(buffer));
+    free(buffer);
+    
+    return result;
+}
+
+// Set the excluded users configuration for CONFIG SET
+int setAuditExcludeUsers(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
     
     size_t len;
-    const char *option = ValkeyModule_StringPtrLen(argv[1], &len);
-    const char *value = ValkeyModule_StringPtrLen(argv[2], &len);
+    const char *new_list = ValkeyModule_StringPtrLen(new_val, &len);
     
-    if (strcasecmp(option, "disable") == 0) {
-        if (strcasecmp(value, "yes") == 0 || strcasecmp(value, "1") == 0) {
-            config.disable_payload = 1;
-            logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", "disable=yes");
-            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-        } else if (strcasecmp(value, "no") == 0 || strcasecmp(value, "0") == 0) {
-            config.disable_payload = 0;
-            logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", "disable=no");
-            ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-        } else {
-            ValkeyModule_ReplyWithError(ctx, "ERR Invalid value. Use 'yes' or 'no'");
-        }
-    } else if (strcasecmp(option, "maxsize") == 0) {
-        // Parse size as a number
-        char *endptr;
-        long size = strtol(value, &endptr, 10);
-        
-        if (*endptr != '\0' || size < 0) {
-            ValkeyModule_ReplyWithError(ctx, "ERR Invalid size. Must be a positive number");
-            return VALKEYMODULE_OK;
-        }
-        
-        config.max_payload_size = (size_t)size;
-        
-        char details[64];
-        snprintf(details, sizeof(details), "maxsize=%zu", config.max_payload_size);
-        logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details);
-        
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-    } else {
-        ValkeyModule_ReplyWithError(ctx, 
-            "ERR Unknown option. Use 'disable' or 'maxsize'");
-    }
+    // Use the existing updateExcludedUsernames function
+    updateExcludedUsernames(new_list);
+    
+    // Log the event
+    char details[100];
+    snprintf(details, sizeof(details), "excludeusers=%s", new_list);
+    logAuditEvent("AUDIT", "SET_EXCLUDE_USERS", details);
     
     return VALKEYMODULE_OK;
 }
@@ -933,64 +1155,28 @@ int AuditUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     return VALKEYMODULE_OK;
 }
 
-// Command to process the excluded users command
-int AuditExcludeUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc == 1) {
-        // No arguments - return the current list
-        size_t bufsize = 1024;
-        char *buffer = malloc(bufsize);
-        if (buffer == NULL) {
-            ValkeyModule_ReplyWithError(ctx, "Out of memory");
-            return VALKEYMODULE_ERR;
-        }
-        
-        // Build comma-separated list
-        buffer[0] = '\0';
-        int first = 1;
-        ExcludedUsernameNode *current = excluded_usernames_head;
-        
+
+
+// Clear all excluded users - to be used when the configuration is set to empty
+int clearAuditExcludeUsers(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    // Reset all no_audit flags in the client hash table
+    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
+        ClientUsernameEntry *current = username_hash[i];
         while (current != NULL) {
-            size_t username_len = strlen(current->username);
-            size_t current_len = strlen(buffer);
-            
-            // Check if we need to resize the buffer
-            if (current_len + username_len + 2 >= bufsize) {
-                bufsize *= 2;
-                char *new_buffer = realloc(buffer, bufsize);
-                if (new_buffer == NULL) {
-                    free(buffer);
-                    ValkeyModule_ReplyWithError(ctx, "Out of memory");
-                    return VALKEYMODULE_ERR;
-                }
-                buffer = new_buffer;
-            }
-            
-            // Add comma if not the first item
-            if (!first) {
-                strcat(buffer, ", ");
-            } else {
-                first = 0;
-            }
-            
-            // Add the username
-            strcat(buffer, current->username);
+            current->no_audit = 0;
             current = current->next;
         }
-        
-        ValkeyModuleString *reply = ValkeyModule_CreateString(ctx, buffer, strlen(buffer));
-        free(buffer);
-        
-        ValkeyModule_ReplyWithString(ctx, reply);
-        return VALKEYMODULE_OK;
-    } else if (argc == 2) {
-        // Set new list
-        const char *new_list = ValkeyModule_StringPtrLen(argv[1], NULL);
-        updateExcludedUsernames(new_list);
-        ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-        return VALKEYMODULE_OK;
-    } else {
-        return ValkeyModule_WrongArity(ctx);
     }
+    
+    // Free all excluded usernames
+    freeExcludedUsernames();
+    
+    // Log the event
+    logAuditEvent("AUDIT", "CLEAR_EXCLUDE_USERS", "");
+    
+    return VALKEYMODULE_OK;
 }
 
 // Command to process the clear excluded users command
@@ -1021,6 +1207,8 @@ int AuditExcludeClearCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, in
 // Client state change callback
 void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
     VALKEYMODULE_NOT_USED(e);
+
+    if (config.enabled!=1) return;
 
     ValkeyModuleClientInfo *ci = data;
     const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ? 
@@ -1120,6 +1308,8 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
     VALKEYMODULE_NOT_USED(password);
     VALKEYMODULE_NOT_USED(err);
 
+    if (config.enabled!=1) return VALKEYMODULE_AUTH_NOT_HANDLED;
+
     // Extract username
     size_t username_len;
     const char *username_str = ValkeyModule_StringPtrLen(username, &username_len);
@@ -1155,6 +1345,8 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
 }
 
 void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
+    if (config.enabled!=1) return;
+
     // Get client info
     unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
     int no_audit = 0;
@@ -1500,61 +1692,76 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         username_hash[i] = NULL;
     }
 
-    // Register module commands
-    // Register audit.setprotocol command
-    if (ValkeyModule_CreateCommand(ctx, "audit.setprotocol",
-            auditSetProtocol_ValkeyCommand,
-            "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    // Register module configurations
+    if (ValkeyModule_RegisterStringConfig(ctx, "protocol", "file audit.log", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditProtocol, setAuditProtocol, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register audit.setformat command
-    if (ValkeyModule_CreateCommand(ctx, "audit.setformat",
-                auditSetFormat_ValkeyCommand,
-                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    if (ValkeyModule_RegisterStringConfig(ctx, "format", "json", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditFormat, setAuditFormat, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register audit.setevents command
-    if (ValkeyModule_CreateCommand(ctx, "audit.setevents",
-                auditSetEvents_ValkeyCommand,
-                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    if (ValkeyModule_RegisterStringConfig(ctx, "events", "all", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditEvents, setAuditEvents, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register audit.setpayloadoptions command
-    if (ValkeyModule_CreateCommand(ctx, "audit.setpayloadoptions",
-                auditSetPayloadOptions_ValkeyCommand,
-                "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
+    if (ValkeyModule_RegisterBoolConfig(ctx, "payload_disable", 0, 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditPayloadDisable, setAuditPayloadDisable, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register audit.getconfig command
-    if (ValkeyModule_CreateCommand(ctx, "audit.getconfig",
-                auditGetConfig_ValkeyCommand,
-                "admin readonly", 0, 0, 0) == VALKEYMODULE_ERR) {
+    if (ValkeyModule_RegisterNumericConfig(ctx, "payload_maxsize", 1024,  // Default 1024
+           VALKEYMODULE_CONFIG_DEFAULT,
+           0,            // Minimum value
+           LLONG_MAX,    // Maximum value
+           getAuditPayloadMaxSize, setAuditPayloadMaxSize, 
+           NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register the AUDITUSERS command
+    if (ValkeyModule_RegisterStringConfig(ctx, "excludeusers", "", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditExcludeUsers, setAuditExcludeUsers, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    // Boolean config example
+    if (ValkeyModule_RegisterBoolConfig(ctx, "enabled", 1, 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditEnabled, setAuditEnabled, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    // Load all configurations
+    if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+        // Register the AUDITUSERS command separately (keeping it as a top-level command)
     if (ValkeyModule_CreateCommand(ctx, "auditusers", 
             AuditUsersCommand,
             "admin no-cluster", 0, 0, 0) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
-    
-    // Register command to set excluded users list
-    if (ValkeyModule_CreateCommand(ctx, "audit.setexcludeusers", 
-             AuditExcludeUsersCommand, 
-            "admin no-cluster", 1, 0, 0) == VALKEYMODULE_ERR) {
-        return VALKEYMODULE_ERR;
-    }
 
-    // Register command to set excluded users list
-    if (ValkeyModule_CreateCommand(ctx, "audit.clearexcludeusers", 
-        AuditExcludeClearCommand, 
-    "admin no-cluster", 1, 0, 0) == VALKEYMODULE_ERR) {
-    return VALKEYMODULE_ERR;
+    // Register audit.getconfig command
+    if (ValkeyModule_CreateCommand(ctx, "audit.getconfig",
+            auditGetConfig_ValkeyCommand,
+            "admin readonly", 0, 0, 0) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
     }
 
     // Subscribe to client connection/disconnection events

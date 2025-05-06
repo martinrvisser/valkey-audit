@@ -68,7 +68,9 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         cls.conf_file = os.path.join(cls.temp_dir, "valkey.conf")
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
-            f.write(f"loadmodule {cls.module_path} protocol file logfile {cls.log_file}\n")
+            #f.write(f"loadmodule {cls.module_path} protocol file {cls.log_file}\n")
+            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"audit.protocol file {cls.log_file}\n")
         
         print(f"written {cls.temp_dir} valkey.conf")
 
@@ -118,7 +120,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         new_log_file = os.path.join(self.temp_dir, "new_audit.log")
         
         # Set the protocol to file with the new path
-        result = self.redis.execute_command("AUDIT.SETPROTOCOL", "file", new_log_file)
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "file "+new_log_file)
         self.assertEqual(result, "OK", "Failed to set protocol to file")
         
         # Write something to trigger an audit event
@@ -140,12 +142,12 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         formats = ["text", "json", "csv"]
         
         # Set the protocol to file with the log_file
-        result = self.redis.execute_command("AUDIT.SETPROTOCOL", "file", self.log_file)
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "file "+ self.log_file)
         self.assertEqual(result, "OK", "Failed to set protocol to file")
 
         for fmt in formats:
             # Set the format
-            result = self.redis.execute_command("AUDIT.SETFORMAT", fmt)
+            result = self.redis.execute_command("CONFIG", "SET", "AUDIT.FORMAT", fmt)
             self.assertEqual(result, "OK", f"Failed to set format to {fmt}")
             
             # Clear the log file
@@ -186,7 +188,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     def test_004_set_events(self):
         """Test enabling/disabling different event categories"""
         # Test setting specific events
-        self.redis.execute_command("AUDIT.SETEVENTS", "config")
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config")
         
         # Clear log file
         self._clear_log_file()
@@ -205,7 +207,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                         "KEY_OP event was logged but should not be")
         
         # Test setting multiple events
-        self.redis.execute_command("AUDIT.SETEVENTS", "config", "keys")
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config, keys")
         
         # Clear log file
         self._clear_log_file()
@@ -224,7 +226,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                        "KEY_OP event was not logged")
         
         # Test disabling all events
-        self.redis.execute_command("AUDIT.SETEVENTS", "none")
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "none")
         
         # Clear log file
         self._clear_log_file()
@@ -238,12 +240,12 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.assertEqual(len(log_lines), 0, "Events were logged when all should be disabled")
         
         # Reset to all events for subsequent tests
-        self.redis.execute_command("AUDIT.SETEVENTS", "all")
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "all")
     
     def test_005_payload_options(self):
         """Test payload logging options"""
         # Set a reasonable payload size
-        self.redis.execute_command("AUDIT.SETPAYLOADOPTIONS", "maxsize", "10")
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_MAXSIZE", "10")
         
         # Clear log file
         self._clear_log_file()
@@ -268,7 +270,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                                f"Payload not truncated to maxsize (10): {payload}")
         
         # Test disabling payload logging
-        self.redis.execute_command("AUDIT.SETPAYLOADOPTIONS", "disable", "yes")
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_DISABLE", "yes")
         
         # Clear log file
         self._clear_log_file()
@@ -284,73 +286,55 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                         "Payload was logged despite being disabled")
         
         # Re-enable payload logging
-        self.redis.execute_command("AUDIT.SETPAYLOADOPTIONS", "disable", "no")
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_DISABLE", "no")
     
-    def test_006_get_config(self):
-        """Test getting the current configuration"""
-        config = self.redis.execute_command("AUDIT.GETCONFIG")
-        
-        # Check structure
-        self.assertEqual(len(config), 5, "Config should have 5 sections")
-
-        config_dict = {}
-        for item in config:
-            if len(item) == 2:
-                key = item[0]
-                value = item[1]
-                if key == 'events' or key == 'payload':
-                    # Process nested list of key-value pairs
-                    nested_dict = {}
-                    if isinstance(value, list):
-                        for sub_item in value:
-                            if len(sub_item) == 2:
-                                sub_key = sub_item[0]
-                                sub_value = sub_item[1]
-                                nested_dict[sub_key] = sub_value
-                    config_dict[key] = nested_dict
-                elif isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
-                    # Handle cases like ['file', '/path/to/file']
-                    config_dict[key] = {value[0]: value[1]}
-                else:
-                    config_dict[key] = value
-            else:
-                print(f"Warning: Skipping malformed item: {item}")
-
-        
-        # Check for required sections
-        required_sections = ["protocol", "format", "events", "payload"]
-        for section in required_sections:
-            self.assertIn(section, config_dict, f"Config missing section: {section}")
-        
-        # Check protocol
-        protocol_info = config_dict["protocol"]
-        self.assertEqual(list(protocol_info.keys())[0], "file", "Protocol key should be 'file'")
-        
-        # Check format (we left it at whatever the last test set it to)
-        format_value = config_dict["format"]
-        self.assertIn(format_value, ["text", "json", "csv"], 
-                     f"Invalid format value: {format_value}")
-        
-        # Check events (we left it at "all" from previous test)
-        events = config_dict["events"]
-        events_dict = {}
-        for key, value in events.items():
-            events_dict[key] = value
-        
-        expected_events = ["connections", "auth", "config", "keys"]
-        for event in expected_events:
-            self.assertIn(event, events_dict, f"Missing event in config: {event}")
-        
-        # Check payload options
-        payload_options = config_dict["payload"]
-        payload_dict = {}
-        for key, value in payload_options.items():
-            payload_dict[key] = value
-        
-        expected_options = ["disable", "maxsize"]
-        for option in expected_options:
-            self.assertIn(option, payload_dict, f"Missing payload option: {option}")
-
+def test_006_get_config(self):
+    """Test getting the current configuration"""
+    config = self.redis.execute_command("CONFIG GET AUDIT.*")
+    
+    # Check structure - Redis returns flat key-value pairs
+    self.assertEqual(len(config), 14, "Config should have 14 items")
+    
+    # Convert flat array to dictionary (every two elements form a key-value pair)
+    config_dict = {}
+    for i in range(0, len(config), 2):
+        key = config[i]
+        value = config[i + 1]
+        config_dict[key] = value
+    
+    # Debug output
+    for key, value in config_dict.items():
+        print(f"{key}: {value}")
+    
+    # Check for required configurations
+    self.assertIn("audit.enabled", config_dict, "Missing audit.enabled config")
+    self.assertIn("audit.events", config_dict, "Missing audit.events config")
+    self.assertIn("audit.format", config_dict, "Missing audit.format config")
+    self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
+    self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
+    self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
+    
+    # Check protocol is set to file
+    self.assertEqual(config_dict["audit.protocol"], "file audit.log", 
+                     "Protocol should be 'file audit.log'")
+    
+    # Check format is json
+    self.assertEqual(config_dict["audit.format"], "json", 
+                     "Format should be 'json'")
+    
+    # Check events is set to all
+    self.assertEqual(config_dict["audit.events"], "all", 
+                     "Events should be 'all'")
+    
+    # Check payload settings
+    self.assertEqual(config_dict["audit.payload_maxsize"], "1024",
+                     "Payload maxsize should be '1024'")
+    self.assertEqual(config_dict["audit.payload_disable"], "no",
+                     "Payload disable should be 'no'")
+    
+    # Check audit is enabled
+    self.assertEqual(config_dict["audit.enabled"], "yes",
+                     "Audit should be enabled")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

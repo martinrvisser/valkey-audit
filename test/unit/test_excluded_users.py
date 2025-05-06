@@ -64,8 +64,10 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
             f.write("aclfile /tmp/valkey-acl-test.acl\n")  # ACL enabled
-            f.write(f"loadmodule {cls.module_path} protocol file logfile {cls.log_file}\n")
-            f.write("logfile /tmp/valkeytest.log\n")  
+            f.write("logfile /tmp/valkeytest.log\n")
+            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"audit.protocol file {cls.log_file}\n")
+  
         
         # Create ACL file with default user
         with open("/tmp/valkey-acl-test.acl", 'w') as f:
@@ -136,13 +138,13 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
     def test_001_exclude_single_user(self):
         """Test excluding a single user from audit"""
         # Set format to text for easier parsing
-        self.redis_admin.execute_command("AUDIT.SETFORMAT", "text")
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
         
         # Enable all event types
-        self.redis_admin.execute_command("AUDIT.SETEVENTS", "all")
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
         
         # Exclude user1 from audit
-        self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS", self.user1)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
         
         # Clear log file
         self._clear_log_file()
@@ -166,7 +168,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         """Test excluding multiple users from audit"""
         # Exclude both test users
         excluded_users = f"{self.user2},{self.user1}"
-        result = self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS",excluded_users)
+        result = self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS",excluded_users)
 
         # Clear log file
         self._clear_log_file()
@@ -197,15 +199,19 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         """Test retrieving the list of excluded users"""
         # Set a specific list of excluded users
         expected_users = f"{self.user1},{self.user2}"
-        self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS", expected_users)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", expected_users)
         
         # Get the current list
-        result = self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS")
-        
-        # The returned list might have spaces after commas, normalize for comparison
-        result_normalized = re.sub(r',\s+', ',', result)
+        result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.EXCLUDEUSERS")
+        print(f"res:{result}")
+
+        # The result is a list where the second element contains the comma-separated users
+        excluded_users_string = result[1]  # Get the actual value from the result list
+
+        # Now normalize both strings for comparison
+        result_normalized = re.sub(r',\s+', ',', excluded_users_string)
         expected_normalized = re.sub(r',\s+', ',', expected_users)
-        
+                
         # Check if all expected users are in the result
         for user in expected_normalized.split(','):
             self.assertIn(user, result_normalized, f"User {user} not found in excluded users list")
@@ -213,10 +219,10 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
     def test_004_clear_excluded_users(self):
         """Test clearing the excluded users list"""
         # First exclude some users
-        self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS", self.user1)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
         
         # Clear the excluded users list
-        self.redis_admin.execute_command("AUDIT.CLEAREXCLUDEUSERS")
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS","")
         
         # Clear log file
         self._clear_log_file()
@@ -234,10 +240,10 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
     def test_005_excluded_user_specific_commands(self):
         """Test that excluded users' specific commands aren't logged but others are"""
         # Set user1 as excluded
-        self.redis_admin.execute_command("AUDIT.SETEXCLUDEUSERS", self.user1)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
         
         # Ensure all categories are enabled
-        self.redis_admin.execute_command("AUDIT.SETEVENTS", "all")
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
         
         # Clear log file
         self._clear_log_file()

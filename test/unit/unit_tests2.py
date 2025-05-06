@@ -12,8 +12,11 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Create a temporary directory for test files
-        cls.temp_dir = tempfile.TemporaryDirectory()
-        cls.log_file = os.path.join(cls.temp_dir.name, "audit.log")
+        #cls.temp_dir_obj = tempfile.TemporaryDirectory()
+        cls.temp_dir = tempfile.mkdtemp(prefix="vka-")
+        print(f"Temporary directory created: {cls.temp_dir}")
+        #cls.log_file = os.path.join(cls.temp_dir.name, "audit.log")
+        cls.log_file = os.path.join(cls.temp_dir, "audit.log")
         
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
@@ -42,7 +45,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         cls._stop_valkey_server()
         
         # Clean up temporary directory
-        cls.temp_dir.cleanup()
+        ########cls.temp_dir.cleanup()
     
     @classmethod
     def _start_valkey_server(cls):
@@ -55,11 +58,15 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         s.close()
         
         # Create configuration file
-        cls.conf_file = os.path.join(cls.temp_dir.name, "valkey.conf")
+        #cls.conf_file = os.path.join(cls.temp_dir.name, "valkey.conf")
+        cls.conf_file = os.path.join(cls.temp_dir, "valkey.conf")
+
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
-            f.write(f"loadmodule {cls.module_path} protocol file logfile {cls.log_file}\n")
-        
+            #f.write(f"loadmodule {cls.module_path} protocol file {cls.log_file}\n")
+            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"audit.protocol file {cls.log_file}\n")
+
         # Start the server with subprocess
         import subprocess
         cls.server_proc = subprocess.Popen(
@@ -92,7 +99,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_001_command_category_filtering(self):
         """Test that commands are filtered correctly by category"""
         # Set format to text for easier parsing
-        self.redis.execute_command("AUDIT.SETFORMAT", "text")
+        self.redis.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
         
         # Test each category individually
         categories = [
@@ -104,8 +111,8 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         
         for cat in categories:
             # Enable only this category
-            self.redis.execute_command("AUDIT.SETEVENTS", cat["mask"])
-            
+            self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", cat["mask"])
+                        
             # Clear log file
             self._clear_log_file()
             
@@ -122,7 +129,6 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
             # Read log file
             log_lines = self._read_log_file()
             
-            # Check if command was logged
             command_logged = any(cat["command"] in line.upper() for line in log_lines)
             self.assertEqual(command_logged, cat["expected_in_log"], 
                             f"Category {cat['name']} not filtered correctly")
@@ -130,25 +136,25 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_002_audit_commands_excluded(self):
         """Test that audit module commands are excluded from logging"""
         # Enable all event types
-        self.redis.execute_command("AUDIT.SETEVENTS", "all")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
         
         # Clear log file
         self._clear_log_file()
         
         # Execute an audit command
-        self.redis.execute_command("AUDIT.GETCONFIG")
+        self.redis.execute_command("AUDITUSERS")
         
         # Read log file
         log_lines = self._read_log_file()
         
         # Verify no "AUDIT" command was logged (to prevent recursion)
-        audit_logged = any("AUDIT.GETCONFIG" in line.upper() for line in log_lines)
+        audit_logged = any("AUDITUSERS" in line.upper() for line in log_lines)
         self.assertFalse(audit_logged, "Audit commands should be excluded from logging")
     
     def test_003_config_command_details(self):
         """Test that CONFIG commands are logged with appropriate details"""
         # Enable only config events
-        self.redis.execute_command("AUDIT.SETEVENTS", "config")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "config")
         
         # Clear log file
         self._clear_log_file()
@@ -167,7 +173,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_004_auth_password_redaction(self):
         """Test that AUTH passwords are always redacted"""
         # Enable auth events
-        self.redis.execute_command("AUDIT.SETEVENTS", "auth")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "auth")
         
         # Clear log file
         self._clear_log_file()
@@ -193,10 +199,10 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_005_key_operation_payload_handling(self):
         """Test payload handling for key operations"""
         # Enable key events
-        self.redis.execute_command("AUDIT.SETEVENTS", "keys")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "keys")
         
         # Set a small payload size limit
-        self.redis.execute_command("AUDIT.SETPAYLOADOPTIONS", "maxsize", "10")
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_MAXSIZE", "10")
         
         # Clear log file
         self._clear_log_file()
@@ -226,7 +232,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
                                "Payload not truncated to configured size")
             
         # Now disable payload logging
-        self.redis.execute_command("AUDIT.SETPAYLOADOPTIONS", "disable", "yes")
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_DISABLE", "yes")
         
         # Clear log file
         self._clear_log_file()
@@ -247,7 +253,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_006_multiple_categories(self):
         """Test that multiple enabled categories work correctly"""
         # Enable both config and keys events
-        self.redis.execute_command("AUDIT.SETEVENTS", "config", "keys")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "config,keys")
         
         # Clear log file
         self._clear_log_file()
@@ -269,13 +275,13 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
     def test_007_format_specific_logging(self):
         """Test that command logging works with different formats"""
         # Enable all event types
-        self.redis.execute_command("AUDIT.SETEVENTS", "all")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
         
         formats = ["text", "json", "csv"]
         
         for fmt in formats:
             # Set the format
-            self.redis.execute_command("AUDIT.SETFORMAT", fmt)
+            self.redis.execute_command("CONFIG","SET","AUDIT.FORMAT", fmt)
             
             # Clear log file
             self._clear_log_file()
