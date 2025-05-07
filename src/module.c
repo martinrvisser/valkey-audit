@@ -285,28 +285,28 @@ static void writeAuditLog(const char *format, ...) {
     }
 }
 
-static void formatEventText(char *buffer, size_t size, const char *category, const char *command, const char *details) {
+static void formatEventText(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *ipaddr) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
     
-    snprintf(buffer, size, "[%s] [%s] %s %s", 
-             timestamp, category, command, details ? details : "");
+    snprintf(buffer, size, "[%s] [%s] %s %s %s %s", 
+             timestamp, category, command, username, ipaddr, details ? details : "");
 }
 
-static void formatEventJson(char *buffer, size_t size, const char *category, const char *command, const char *details) {
+static void formatEventJson(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *ipaddr) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
     
-    snprintf(buffer, size, 
-             "{\"timestamp\":\"%s\",\"category\":\"%s\",\"command\":\"%s\",\"details\":\"%s\"}",
-             timestamp, category, command, details ? details : "null");
+    snprintf(buffer, size,
+        "{\"timestamp\":\"%s\",\"category\":\"%s\",\"command\":\"%s\",\"username\":\"%s\",\"ip\":\"%s\",\"details\":\"%s\"}",
+        timestamp, category, command, username, ipaddr, details ? details : "null");
 }
 
-static void formatEventCsv(char *buffer, size_t size, const char *category, const char *command, const char *details) {
+static void formatEventCsv(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *ipaddr) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
@@ -326,23 +326,23 @@ static void formatEventCsv(char *buffer, size_t size, const char *category, cons
         *dst = '\0';
     }
     
-    snprintf(buffer, size, "%s,%s,%s,%s", 
-             timestamp, category, command, escaped_details);
+    snprintf(buffer, size, "%s,%s,%s,%s,%s,%s", 
+             timestamp, category, command, username, ipaddr, escaped_details);
 }
 
-static void logAuditEvent(const char *category, const char *command, const char *details) {
+static void logAuditEvent(const char *category, const char *command, const char *details, const char *username, const char *ipaddr) {
     char buffer[4096];
     
     switch(config.format) {
         case FORMAT_JSON:
-            formatEventJson(buffer, sizeof(buffer), category, command, details);
+            formatEventJson(buffer, sizeof(buffer), category, command, details, username, ipaddr);
             break;
         case FORMAT_CSV:
-            formatEventCsv(buffer, sizeof(buffer), category, command, details);
+            formatEventCsv(buffer, sizeof(buffer), category, command, details, username, ipaddr);
             break;
         case FORMAT_TEXT:
         default:
-            formatEventText(buffer, sizeof(buffer), category, command, details);
+            formatEventText(buffer, sizeof(buffer), category, command, details, username, ipaddr);
             break;
     }
     
@@ -427,7 +427,7 @@ void addExclusionRule(const char *username, const char *ip_address) {
         snprintf(log_message, sizeof(log_message), 
                 "Added exclusion rule: ip=%s (any username)", ip_address);
     }
-    logAuditEvent("AUDIT", "ADD_EXCLUSION_RULE", log_message);
+    logAuditEvent("AUDIT", "ADD_EXCLUSION_RULE", log_message, "n/a", "n/a");
 }
 
 int isClientExcluded(const char *username, const char *ip_address) {
@@ -549,7 +549,7 @@ void updateExclusionRules(const char *csv_list) {
                         char log_message[256];
                         snprintf(log_message, sizeof(log_message), 
                                 "Invalid IP address in exclusion rule: %s", ip_address);
-                        logAuditEvent("AUDIT", "INVALID_IP_ADDRESS", log_message);
+                        logAuditEvent("AUDIT", "INVALID_IP_ADDRESS", log_message, "n/a", "n/a");
                         
                         // Skip this rule
                         token = strtok(NULL, ",");
@@ -970,15 +970,15 @@ int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata
     
     if (strcasecmp(format, "text") == 0) {
         config.format = FORMAT_TEXT;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=text");
+        logAuditEvent("AUDIT", "SET_FORMAT", "format=text", "n/a", "n/a");
         return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "json") == 0) {
         config.format = FORMAT_JSON;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=json");
+        logAuditEvent("AUDIT", "SET_FORMAT", "format=json", "n/a", "n/a");
         return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "csv") == 0) {
         config.format = FORMAT_CSV;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=csv");
+        logAuditEvent("AUDIT", "SET_FORMAT", "format=csv", "n/a", "n/a");
         return VALKEYMODULE_OK;
     } else {
         // Create error message
@@ -1031,12 +1031,12 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     // Process special keywords "all" or "none"
     if (strcasecmp(events_copy, "all") == 0) {
         config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
-        logAuditEvent("AUDIT", "SET_EVENTS", "events=all");
+        logAuditEvent("AUDIT", "SET_EVENTS", "events=all", "n/a", "n/a");
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
     } else if (strcasecmp(events_copy, "none") == 0) {
         config.event_mask = 0;
-        logAuditEvent("AUDIT", "SET_EVENTS", "events=none");
+        logAuditEvent("AUDIT", "SET_EVENTS", "events=none", "n/a", "n/a");
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
     }
@@ -1086,7 +1086,7 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     
     char details[512];
     snprintf(details, sizeof(details), "events=%s", event_str);
-    logAuditEvent("AUDIT", "SET_EVENTS", details);
+    logAuditEvent("AUDIT", "SET_EVENTS", details, "n/a", "n/a");
     
     ValkeyModule_Free(events_copy);
     return VALKEYMODULE_OK;
@@ -1107,7 +1107,7 @@ int setAuditPayloadDisable(const char *name, int new_val, void *privdata, Valkey
     
     char details[32];
     snprintf(details, sizeof(details), "disable=%s", new_val ? "yes" : "no");
-    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details);
+    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details, "n/a", "n/a");
     
     return VALKEYMODULE_OK;
 }
@@ -1130,7 +1130,7 @@ int setAuditPayloadMaxSize(const char *name, long long new_val, void *privdata, 
     
     char details[64];
     snprintf(details, sizeof(details), "maxsize=%zu", config.max_payload_size);
-    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details);
+    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details, "n/a", "n/a");
     
     return VALKEYMODULE_OK;
 }
@@ -1164,7 +1164,6 @@ int setAuditAlwaysAuditConfig(const char *name, int new_val, void *privdata, Val
     config.always_audit_config = new_val;
     return VALKEYMODULE_OK;   
 }
-
 
 // Exclusion
 ValkeyModuleString *getAuditExclusionRules(const char *name, void *privdata) {
@@ -1252,7 +1251,7 @@ int setAuditExclusionRules(const char *name, ValkeyModuleString *new_val, void *
         strcat(truncated, "...");
         snprintf(details, sizeof(details), "excluderules=%s", truncated);
     }
-    logAuditEvent("AUDIT", "SET_EXCLUDE_RULES", details);
+    logAuditEvent("AUDIT", "SET_EXCLUDE_RULES", details, "n/a", "n/a");
     
     return VALKEYMODULE_OK;
 }
@@ -1275,11 +1274,10 @@ int clearAuditExclusionRules(const char *name, void *privdata) {
     freeExclusionRules();
     
     // Log the event
-    logAuditEvent("AUDIT", "CLEAR_EXCLUDE_RULES", "");
+    logAuditEvent("AUDIT", "CLEAR_EXCLUDE_RULES", "", "n/a", "n/a");
     
     return VALKEYMODULE_OK;
 }
-
 
 
 /////  Callback functions  /////
@@ -1365,8 +1363,7 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
     
     // Format the audit message with username information
     snprintf(buffer, sizeof(buffer), 
-             "Client %s event for client #%llu %s:%d using username: %s type %s",
-             event_type, 
+             "client #%llu %s:%d using username: %s type %s",
              (unsigned long long)ci->id, 
              ci->addr, 
              ci->port, 
@@ -1375,7 +1372,7 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
             );
     
     // Log the message
-    logAuditEvent("CONNECTION", event_type, buffer);
+    logAuditEvent("CONNECTION", event_type, buffer, username, ci->addr);
     
     // Clean up our temporary memory
     if (temp_username != NULL) {
@@ -1415,7 +1412,7 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
                  username_str, (unsigned long long)client_id, client_info);
 
     // Log the auth attempt
-    logAuditEvent("AUTH", "ATTEMPT", buffer);
+    logAuditEvent("AUTH", "ATTEMPT", buffer, username_str, client_ip);
 
     // Update the username in our hash table if the auth will succeed
     // We don't know yet if it will succeed, but we store it anyway and let
@@ -1631,7 +1628,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     }
     
     // Log the audit event
-    logAuditEvent(category_str, command_str, details);
+    logAuditEvent(category_str, command_str, details, username, ip_address);
 }
 
 // to be removed
