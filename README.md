@@ -22,58 +22,63 @@ cmake --build build --target all
 
 ### Loading the Module
 
-Add the following line to your Valkey configuration file:
+Add the following line to your Valkey configuration file or issue a MODULE LOAD command.
 
 ```
 loadmodule /path/to/libvalkeyaudit.so
 ```
 
-You can also specify initial configuration parameters:
+### Configuring the Module
+The module uses the standard Valkey configuration facility which means that parameters can accessed with CONFIG SET and GET as well as written to the valkey.conf file with CONFIG REWRITE or manually.
+
+Available parameters:
+- `audit.enable [yes|no]`: Enable or disable auditing.
+- `audit.protocol [file|syslog]`: Logging protocol to use. 
+    When using the file protocol it should be followed by the filepath.
+    When using the syslog protocol it should be followed by the syslog facility.
+- `audit.format [text|json|csv]`: Log format.
+- `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys).
+- `audit.payload_disable`: Disable logging command payloads.
+- `audit.payload_maxsize [size]`: Maximum payload size to log in bytes.
+- `audit.excludeusers`: Specific usernames to exclude from auditing.
+
+## Example Usage
+
+### enable/disable
+To enable/disable auditing:
 
 ```
-loadmodule /path/to/libvalkeyaudit.so protocol file logfile /path/to/audit.log format json events all
+CONFIG SET AUDIT.ENABLE yes
+CONFIG SET AUDIT.ENABLE no
 ```
 
-Available loading parameters:
-- `protocol [file|syslog]`: Logging protocol to use
-- `logfile [path]`: Path to the audit log file (for file protocol)
-- `format [text|json|csv]`: Log format
-- `syslog-facility [facility]`: Syslog facility (for syslog protocol)
-- `events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys)
-- `disable-payload`: Disable logging command payloads
-- `max-payload-size [size]`: Maximum payload size to log
+### protocol
 
-## Usage
-
-The module provides the following commands:
-
-### audit.setprotocol
-
-Sets the audit logging protocol.
+To set the audit logging protocol, use one of:
 
 ```
-AUDIT.SETPROTOCOL file /path/to/logfile
-AUDIT.SETPROTOCOL syslog local0
+CONFIG SET AUDIT.PROTOCOL file /path/to/logfile
+CONFIG SET AUDIT.PROTOCOL syslog local0
 ```
 
-### audit.setformat
+### format
 
-Sets the audit log format.
-
-```
-AUDIT.SETFORMAT text
-AUDIT.SETFORMAT json
-AUDIT.SETFORMAT csv
-```
-
-### audit.setevents
-
-Sets which event categories to audit.
+To sets the audit log format:
 
 ```
-AUDIT.SETEVENTS all          # Enable all events
-AUDIT.SETEVENTS none         # Disable all events
-AUDIT.SETEVENTS connections auth  # Enable only connection and auth events
+CONFIG SET AUDIT.FORMAT text
+CONFIG SET AUDIT.FORMAT json
+CONFIG SET AUDIT.FORMAT csv
+```
+
+### events
+
+To set the which event categories to audit, use one of the below: 
+
+```
+CONFIG SET AUDIT.EVENTS all          # Enable all events
+CONFIG SET AUDIT.EVENTS none         # Disable all events
+CONFIG SET AUDIT.EVENTS connections,auth  # Enable only connection and auth events
 ```
 
 Available event categories:
@@ -82,37 +87,41 @@ Available event categories:
 - `config`: Configuration commands
 - `keys`: Key operations
 
-### audit.setpayloadoptions
+### payload
 
-Configures options for payload logging.
-
-```
-AUDIT.SETPAYLOADOPTIONS disable yes|no
-AUDIT.SETPAYLOADOPTIONS maxsize 1024
-```
-
-### audit.getconfig
-
-Retrieves the current audit configuration.
+Configure options for payload logging:
 
 ```
-AUDIT.GETCONFIG
+CONFIG SET AUDIT.PAYLOAD_DISABLE yes|no
+CONFIG SET AUDIT.PAYLOAD_MAXSIZE 1024
+```
+
+### retrieve the current configuration
+
+To retrieve the current complete audit configuration:
+
+```
+CONFIG GET AUDIT.*
+```
+
+To retrieve the current specific audit configuration parameter:
+
+```
+CONFIG GET AUDIT.FORMAT 
 ```
 
 ### audit.setexcludeusers
 
-Set usernames to be excluded from auditing through a comma-separated list.
+Set usernames to be excluded from auditing through a comma-separated list:
 
 ```
-AUDIT.SETEXCLUDEUSERS <un1, un2>
+CONFIG SET AUDIT.EXCLUDEUSERS "un1,un2"
 ```
 
-### audit.clearexcludeusers
-
-Remove the current list of usernames to be excluded from auditing.
+To remove the current list of usernames to be excluded from auditing:
 
 ```
-AUDIT.CLEAREXCLUDEUSERS
+CONFIG SET AUDIT.EXCLUDEUSERS ""
 ```
 
 ## Manual Module Testing
@@ -144,6 +153,7 @@ To stop the servers, run:
 ## Unit Tests
 
 The unit tests are written in python and can be found in the test/unit directory. They will start a local valkey server with the module loaded.
+
 Requirements:
 - valkey installation, environment variable VALKEY_SERVER if not in the path
 - environment variable AUDIT_MODULE_PATH to point at the module shared library libvalkeyaudit.so
