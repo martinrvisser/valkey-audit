@@ -143,8 +143,8 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         # Enable all event types
         self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
         
-        # Exclude user1 from audit
-        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
+        # Exclude user1 from audit (username only rule)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", self.user1)
         
         # Clear log file
         self._clear_log_file()
@@ -163,18 +163,76 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         # Check user2's command should be logged
         user2_logged = any(f"exclude_test_key2" in line for line in log_lines)
         self.assertTrue(user2_logged, f"Non-excluded user {self.user2} was not logged")
-    
-    def test_002_exclude_multiple_users(self):
-        """Test excluding multiple users from audit"""
-        # Exclude both test users
-        excluded_users = f"{self.user2},{self.user1}"
-        result = self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS",excluded_users)
+
+    def test_002_exclude_by_ip_address(self):
+        """Test excluding clients by IP address from audit"""
+        # Set format to text for easier parsing
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
+        
+        # Enable all event types
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
+        
+        # Exclude localhost IP address
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", "@127.0.0.1")
+        
+        # Clear log file
+        self._clear_log_file()
+        
+        # Execute commands from localhost (all test clients)
+        self.redis_user1.set("ip_exclude_test_key1", "value1")
+        self.redis_user2.set("ip_exclude_test_key2", "value2")
+        
+        # Read log file
+        log_lines = self._read_log_file()
+        
+        # Check neither command should be logged since both come from localhost
+        user1_logged = any(f"ip_exclude_test_key1" in line for line in log_lines)
+        user2_logged = any(f"ip_exclude_test_key2" in line for line in log_lines)
+        
+        self.assertFalse(user1_logged, f"Command from excluded IP was logged")
+        self.assertFalse(user2_logged, f"Command from excluded IP was logged")
+
+    def test_003_exclude_specific_user_from_specific_ip(self):
+        """Test excluding specific user from specific IP address"""
+        # Set format to text for easier parsing
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
+        
+        # Enable all event types
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
+        
+        # Exclude user1 only when connecting from localhost
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", f"{self.user1}@127.0.0.1")
+        
+        # Clear log file
+        self._clear_log_file()
+        
+        # Execute commands as both users
+        self.redis_user1.set("specific_exclude_key1", "value1")
+        self.redis_user2.set("specific_exclude_key2", "value2")
+        
+        # Read log file
+        log_lines = self._read_log_file()
+        
+        # Check user1's command should NOT be logged (excluded by username@ip)
+        user1_logged = any(f"specific_exclude_key1" in line for line in log_lines)
+        self.assertFalse(user1_logged, f"User excluded by username@ip was logged")
+        
+        # Check user2's command should be logged
+        user2_logged = any(f"specific_exclude_key2" in line for line in log_lines)
+        self.assertTrue(user2_logged, f"Non-excluded user was not logged")
+
+    def test_004_exclude_multiple_rules(self):
+        """Test excluding with multiple rules (username, IP, and combo)"""
+        # Exclude with multiple rules:
+        # 1. user1 from any IP
+        # 2. Any user from 192.168.1.1
+        # 3. user2 specifically from 127.0.0.1
+        excluded_rules = f"{self.user1},@192.168.1.1,{self.user2}@127.0.0.1"
+        result = self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", excluded_rules)
 
         # Clear log file
         self._clear_log_file()
         
-        log_lines = self._read_log_file()
-
         # Execute commands as both users
         self.redis_user1.set("multi_exclude_key1", "value1")
         self.redis_user2.set("multi_exclude_key2", "value2")
@@ -184,45 +242,46 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         
         # Read log file
         log_lines = self._read_log_file()
-        # Check neither user's commands should be logged
+        
+        # Check test users' commands should not be logged
         user1_logged = any(f"multi_exclude_key1" in line for line in log_lines)
         user2_logged = any(f"multi_exclude_key2" in line for line in log_lines)
         
         self.assertFalse(user1_logged, f"Excluded user {self.user1} was logged")
-        self.assertFalse(user2_logged, f"Excluded user {self.user2} was logged")
+        self.assertFalse(user2_logged, f"Excluded user {self.user2} was logged when connecting from 127.0.0.1")
         
         # Admin should still be logged
         admin_logged = any(f"admin_key" in line for line in log_lines)
         self.assertTrue(admin_logged, "Admin user should be logged")
-    
-    def test_003_get_excluded_users(self):
-        """Test retrieving the list of excluded users"""
-        # Set a specific list of excluded users
-        expected_users = f"{self.user1},{self.user2}"
-        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", expected_users)
+
+    def test_005_get_exclusion_rules(self):
+        """Test retrieving the list of exclusion rules"""
+        # Set a specific list of exclusion rules
+        expected_rules = f"{self.user1},@127.0.0.1,{self.user2}@192.168.1.1"
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", expected_rules)
         
         # Get the current list
-        result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.EXCLUDEUSERS")
+        result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.EXCLUDERULES")
         print(f"res:{result}")
 
-        # The result is a list where the second element contains the comma-separated users
-        excluded_users_string = result[1]  # Get the actual value from the result list
+        # The result is a list where the second element contains the comma-separated rules
+        exclusion_rules_string = result[1]  # Get the actual value from the result list
 
         # Now normalize both strings for comparison
-        result_normalized = re.sub(r',\s+', ',', excluded_users_string)
-        expected_normalized = re.sub(r',\s+', ',', expected_users)
+        result_normalized = re.sub(r',\s+', ',', exclusion_rules_string)
+        expected_normalized = re.sub(r',\s+', ',', expected_rules)
                 
-        # Check if all expected users are in the result
-        for user in expected_normalized.split(','):
-            self.assertIn(user, result_normalized, f"User {user} not found in excluded users list")
-    
-    def test_004_clear_excluded_users(self):
-        """Test clearing the excluded users list"""
-        # First exclude some users
-        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
+        # Check if all expected rules are in the result
+        for rule in expected_normalized.split(','):
+            self.assertIn(rule, result_normalized, f"Rule {rule} not found in exclusion rules list")
+
+    def test_006_clear_exclusion_rules(self):
+        """Test clearing the exclusion rules list"""
+        # First exclude some users and IPs
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", f"{self.user1},@127.0.0.1")
         
-        # Clear the excluded users list
-        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS","")
+        # Clear the exclusion rules list
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES","")
         
         # Clear log file
         self._clear_log_file()
@@ -236,11 +295,48 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         # Check that the previously excluded user is now logged
         user_logged = any(f"after_clear_key" in line for line in log_lines)
         self.assertTrue(user_logged, "Previously excluded user should now be logged")
-    
-    def test_005_excluded_user_specific_commands(self):
-        """Test that excluded users' specific commands aren't logged but others are"""
-        # Set user1 as excluded
-        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDEUSERS", self.user1)
+
+    def test_007_invalid_ip_handling(self):
+        """Test handling of invalid IP addresses in exclusion rules"""
+        # Try to set rules with invalid IP addresses
+        invalid_rules = f"{self.user1}@999.999.999.999,@not.an.ip.address"
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", invalid_rules)
+        
+        # Valid rule should still be added
+        valid_rule = f"{self.user1}"
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", valid_rule)
+        
+        # Get the current rules
+        result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.EXCLUDERULES")
+        exclusion_rules_string = result[1]
+        
+        # Check that invalid IPs were not added
+        self.assertNotIn("999.999.999.999", exclusion_rules_string, "Invalid IP should not be in rules")
+        self.assertNotIn("not.an.ip.address", exclusion_rules_string, "Invalid IP should not be in rules")
+        
+        # Check that valid username was added
+        self.assertIn(self.user1, exclusion_rules_string, "Valid username should be in rules")
+
+    def test_008_ipv6_support(self):
+        """Test IPv6 address support in exclusion rules"""
+        # Set rules with IPv6 addresses (using standard localhost IPv6)
+        ipv6_rules = f"@::1,{self.user1}@::1"
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", ipv6_rules)
+        
+        # Get the current rules
+        result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.EXCLUDERULES")
+        exclusion_rules_string = result[1]
+        
+        # Check that IPv6 addresses were added correctly
+        self.assertIn("::1", exclusion_rules_string, "IPv6 address should be in rules")
+        
+        # If using IPv6 for testing, we could also test actual command exclusion here
+        # But that would require connecting to Redis over IPv6, which may not be available in all test environments
+
+    def test_009_excluded_user_specific_commands(self):
+        """Test that excluded clients' specific commands aren't logged but others are"""
+        # Set user1 as excluded by username only
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", self.user1)
         
         # Ensure all categories are enabled
         self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")

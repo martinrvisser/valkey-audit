@@ -26,24 +26,12 @@ static AuditConfig config = {
     .file_fd = -1
 };
 
-// Forward declarations
-//static int auditSetProtocol_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-//static int auditSetFormat_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-//static int auditSetEvents_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-//static int auditSetPayloadOptions_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-//static int auditGetConfig_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
-
 static ValkeyModuleCommandFilter *filter;
 static ConnectionStats stats = {0};
 static ClientUsernameEntry *username_hash[USERNAME_HASH_SIZE] = {0};
 
-// Hash function for client IDs
-static size_t hash_client_id(uint64_t client_id) {
-    return client_id % USERNAME_HASH_SIZE;
-}
-
 // Global head of the linked list for excluded usernames
-static ExcludedUsernameNode *excluded_usernames_head = NULL;
+static ExclusionRule *exclusion_rules_head = NULL;
 
 // Hash function for the command lookup
 static unsigned long hash_commands(const char *str, size_t len) {
@@ -58,12 +46,12 @@ static unsigned long hash_commands(const char *str, size_t len) {
     return hash;
 }
 
-/* Static definition of command info cache */
+// Static definition of command info cache 
 static AuditModuleCommandInfo *last_cmd_info = NULL;
 static char last_cmd_name[64] = "";
 static size_t last_cmd_len = 0;
 
-/* Static command info table (hash table) */
+// Static command info table (hash table)
 static AuditModuleCommandInfo *command_info_table[COMMAND_TABLE_SIZE];
 static bool command_table_initialized = false;
 
@@ -134,19 +122,77 @@ static CommandDefinition keyCommands[] = {
     {NULL, 0, 0, 0, 0}
 };
 
+// helper functions for IP validation
+int isValidIPv4(const char *ip) {
+    if (ip == NULL || *ip == '\0') return 0;
+    
+    // IPv4 address must be in format x.x.x.x where x is 0-255
+    unsigned int a, b, c, d;
+    char extra; // To detect any extra characters
+    
+    int result = sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra);
+    
+    // Check if we got exactly 4 numbers and nothing else
+    if (result != 4) return 0;
+    
+    // Check if each number is in range 0-255
+    if (a > 255 || b > 255 || c > 255 || d > 255) return 0;
+    
+    return 1;
+}
+
+int isValidIPv6(const char *ip) {
+    if (ip == NULL || *ip == '\0') return 0;
+    
+    // Basic validation for IPv6
+    // More comprehensive validation would check for proper formatting
+    // of hexadecimal groups and compressed notation
+    
+    // Check for presence of colons (at least 2 for IPv6)
+    int colons = 0;
+    const char *ptr = ip;
+    while (*ptr) {
+        if (*ptr == ':') colons++;
+        // IPv6 only allows hexadecimal digits and colons
+        else if (!((*ptr >= '0' && *ptr <= '9') || 
+                  (*ptr >= 'a' && *ptr <= 'f') || 
+                  (*ptr >= 'A' && *ptr <= 'F'))) {
+            return 0;
+        }
+        ptr++;
+    }
+    
+    // IPv6 needs at least 2 colons
+    if (colons < 2) return 0;
+    
+    return 1;
+}
+
+int isValidIP(const char *ip) {
+    if (ip == NULL || *ip == '\0') return 0;
+    
+    // Check for IPv4
+    if (isValidIPv4(ip)) return 1;
+    
+    // Check for IPv6
+    if (isValidIPv6(ip)) return 1;
+    
+    return 0;
+}
+
 AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t cmd_len) {
     if (cmd_name == NULL || cmd_len == 0) {
         return NULL;
     }
 
-    /* Check if we can return the cached command info */
+    // Check if we can return the cached command info
     if (last_cmd_info != NULL &&
         last_cmd_len == cmd_len &&
         strncasecmp(last_cmd_name, cmd_name, cmd_len) == 0) {
         return last_cmd_info;
     }
 
-    /* Initialize the command table if not already done */
+    // Initialize the command table if not already done
     if (!command_table_initialized) {
         // Clear command table
         memset(command_info_table, 0, sizeof(command_info_table));
@@ -189,7 +235,7 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
         command_table_initialized = true;
     }
 
-    /* Lookup the command in the hash table */
+    // Lookup the command in the hash table
     unsigned long hash = hash_commands(cmd_name, cmd_len) % COMMAND_TABLE_SIZE;
     size_t index = hash;
     size_t start_index = index;
@@ -214,279 +260,8 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
         index = (index + 1) % COMMAND_TABLE_SIZE;
     } while (index != start_index);
 
-    /* Command not found */
+    // Command not found
     return NULL;
-}
-
-
-/////   Section for excluded usernames list functions  /////
-// Free the entire excluded usernames list
-void freeExcludedUsernames() {
-    ExcludedUsernameNode *current = excluded_usernames_head;
-    while (current != NULL) {
-        ExcludedUsernameNode *next = current->next;
-        free(current->username);
-        free(current);
-        current = next;
-    }
-    excluded_usernames_head = NULL;
-}
-
-// Check if a username is in the excluded list
-int isUsernameExcluded(const char *username) {
-    if (username == NULL) {
-        return 0;
-    }
-
-    if (excluded_usernames_head == NULL) return 0;
-    
-    // Use case-insensitive comparison to ensure consistency
-    ExcludedUsernameNode *current = excluded_usernames_head;
-    while (current != NULL) {
-        if (strcasecmp(current->username, username) == 0) {
-            return 1;
-        }
-        current = current->next;
-    }
-    return 0;
-}
-
-// Add a username to the excluded list
-void addExcludedUsername(const char *username) {
-    // Don't add if it's already in the list
-    if (isUsernameExcluded(username)) return;
-    
-    ExcludedUsernameNode *new_node = (ExcludedUsernameNode*)malloc(sizeof(ExcludedUsernameNode));
-    if (new_node == NULL) return;  // Out of memory
-    
-    new_node->username = strdup(username);
-    if (new_node->username == NULL) {
-        free(new_node);
-        return;  // Out of memory
-    }
-    
-    // Add at the beginning of the list
-    new_node->next = excluded_usernames_head;
-    excluded_usernames_head = new_node;
-}
-
-// Parse the comma-separated list and update the excluded usernames list
-void updateExcludedUsernames(const char *csv_list) {
-    // First, reset all no_audit flags in the client hash table
-    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
-        ClientUsernameEntry *current = username_hash[i];
-        while (current != NULL) {
-            current->no_audit = 0;
-            current = current->next;
-        }
-    }
-    
-    // Clear previous entries in the excluded list
-    freeExcludedUsernames();
-
-    // If empty list, just return - all flags are already reset
-    if (csv_list == NULL || *csv_list == '\0') return;
-
-    // Make a copy of the list so we can modify it
-    char *list_copy = strdup(csv_list);
-    if (list_copy == NULL) return;
-
-    // Parse the comma-separated values
-    char *token = strtok(list_copy, ",");
-    while (token != NULL) {
-        // Trim whitespace
-        while (*token == ' ') token++;
-        char *end = token + strlen(token) - 1;
-        while (end > token && *end == ' ') end--;
-        *(end + 1) = '\0';
-
-        // Add to list if not empty
-        if (*token != '\0') {
-            addExcludedUsername(token);
-
-            // Set no_audit flag for matching clients
-            for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
-                ClientUsernameEntry *current = username_hash[i];
-                while (current != NULL) {
-                    if (strcmp(current->username, token) == 0) {
-                        current->no_audit = 1;
-                    }
-                    current = current->next;
-                }
-            }
-        }
-
-        token = strtok(NULL, ",");
-    }
-
-    free(list_copy);
-}
-
-/////   Section for client hash table functions  /////
-// Find the entry for client_id in the clients hash table
-ClientUsernameEntry* getClientEntry(uint64_t client_id) {
-    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
-    ClientUsernameEntry *current = username_hash[hash_index];
-    
-    // Search the linked list for the client_id
-    while (current != NULL) {
-        if (current->client_id == client_id) {
-            return current;
-        }
-        current = current->next;
-    }
-    
-    return NULL; // Not found
-}
-
-// Get username for a client ID
-const char *getClientUsername(uint64_t client_id) {
-    size_t idx = hash_client_id(client_id);
-    
-    ClientUsernameEntry *entry = username_hash[idx];
-    while (entry) {
-        if (entry->client_id == client_id) {
-            return entry->username;
-        }
-        entry = entry->next;
-    }
-    
-    return NULL;  // Not found
-}
-
-// Add or update a client ID to username mapping
-// also set the no_audit flag if the username is to be excluded
-void storeClientUsername(uint64_t client_id, const char *username, int no_audit) {
-    // Allocate memory for the new entry
-    ClientUsernameEntry *entry = malloc(sizeof(ClientUsernameEntry));
-    if (entry == NULL) {
-        return;
-    }
-    
-    // Make a copy of the username
-    char *username_copy = strdup(username);
-    if (username_copy == NULL) {
-        // Handle strdup failure
-        free(entry);
-        return;
-    }
-    
-    // Initialize the entry
-    entry->client_id = client_id;
-    entry->username = username_copy;
-    entry->no_audit = no_audit;
-    entry->next = NULL;
-    
-    // Calculate hash value (using simple modulo hash)
-    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
-    
-    // Add to hash table with basic collision handling (linked list chaining)
-    if (username_hash[hash_index] == NULL) {
-        // First entry at this hash index
-        username_hash[hash_index] = entry;
-    } else {
-        // Collision - add to the beginning of the linked list
-        // Check if client_id already exists and update it instead
-        ClientUsernameEntry *current = username_hash[hash_index];
-        ClientUsernameEntry *prev = NULL;
-        
-        while (current != NULL) {
-            if (current->client_id == client_id) {
-                // Client ID already exists - update the entry
-                free(current->username);  // Free the old username
-                current->username = username_copy;
-                current->no_audit = no_audit;
-                free(entry);  // Free the unused entry
-                return;
-            }
-            prev = current;
-            current = current->next;
-        }
-        
-        // Add new entry to the end of the list
-        prev->next = entry;
-    }
-}
-
-// Remove a client ID from the hash table
-void removeClientUsername(uint64_t client_id) {
-    size_t idx = hash_client_id(client_id);
-    
-    ClientUsernameEntry *entry = username_hash[idx];
-    ClientUsernameEntry *prev = NULL;
-    
-    while (entry) {
-        if (entry->client_id == client_id) {
-            if (prev) {
-                prev->next = entry->next;
-            } else {
-                username_hash[idx] = entry->next;
-            }
-            free(entry->username);
-            free(entry);
-            return;
-        }
-        prev = entry;
-        entry = entry->next;
-    }
-}
-
-// Print the contents of the user hash table
-void printUserHashContents(ValkeyModuleCtx *ctx) {
-    char buffer[4096] = "User hash table contents:\n";
-    size_t offset = strlen(buffer);
-    size_t remaining = sizeof(buffer) - offset;
-    int empty = 1;
-
-    for (size_t i = 0; i < USERNAME_HASH_SIZE; i++) {
-        ClientUsernameEntry *entry = username_hash[i];
-        
-        while (entry && remaining > 0) {
-            int written = snprintf(buffer + offset, remaining, 
-                                  "Client ID: %llu, Username: %s, NoAudit: %d \n", 
-                                  (unsigned long long)entry->client_id, 
-                                  entry->username ? entry->username : "NULL",
-                                  entry->no_audit);
-            
-            if (written > 0 && (size_t)written < remaining) {
-                offset += written;
-                remaining -= written;
-                empty = 0;
-            } else {
-                // Buffer full
-                break;
-            }
-            
-            entry = entry->next;
-        }
-        
-        if (remaining <= 0) {
-            break;
-        }
-    }
-    
-    if (empty) {
-        strcat(buffer, "  (empty)\n");
-    }
-    
-    // log to server log for admin viewing
-    ValkeyModule_Log(ctx, "notice", "%s", buffer);
-}
-
-/////  Logging functions  /////
-// Helper function to get formatted timestamp
-/*static void getTimeStr(char *buffer, size_t size) {
-    time_t now = time(NULL);
-    struct tm *timeinfo = localtime(&now);
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", timeinfo);
-}*/
-
-// Get client type string
-static const char* getClientTypeStr(ValkeyModuleClientInfo *ci) {
-    if (ci->flags & (1ULL << 0)) return "normal";
-    if (ci->flags & (1ULL << 1)) return "replica";
-    if (ci->flags & (1ULL << 2)) return "pubsub";
-    return "unknown";
 }
 
 // Helper functions for formatting and writing audit logs
@@ -574,8 +349,451 @@ static void logAuditEvent(const char *category, const char *command, const char 
     writeAuditLog("%s", buffer);
 }
 
+
+/////   Section for exclusion rules functions  /////
+// Free the entire exclusion rules list
+void freeExclusionRules() {
+    ExclusionRule *current = exclusion_rules_head;
+    while (current != NULL) {
+        ExclusionRule *next = current->next;
+        if (current->username) free(current->username);
+        if (current->ip_address) free(current->ip_address);
+        free(current);
+        current = next;
+    }
+    exclusion_rules_head = NULL;
+}
+
+int isRuleAlreadyExcluded(const char *username, const char *ip_address) {
+    ExclusionRule *current = exclusion_rules_head;
+    while (current != NULL) {
+        // Check if this rule matches
+        int username_match = (username == NULL && current->username == NULL) ||
+                            (username != NULL && current->username != NULL && 
+                             strcasecmp(current->username, username) == 0);
+        
+        int ip_match = (ip_address == NULL && current->ip_address == NULL) ||
+                       (ip_address != NULL && current->ip_address != NULL && 
+                        strcmp(current->ip_address, ip_address) == 0);
+        
+        if (username_match && ip_match) {
+            return 1;  // Found a match
+        }
+        
+        current = current->next;
+    }
+    return 0;  // No match found
+}
+
+void addExclusionRule(const char *username, const char *ip_address) {
+    // Skip if both are NULL (shouldn't happen)
+    if (username == NULL && ip_address == NULL) return;
+    
+    // IP address must be valid if provided
+    if (ip_address != NULL && !isValidIP(ip_address)) return;
+    
+    // Check for duplicate rule
+    if (isRuleAlreadyExcluded(username, ip_address)) return;
+    
+    ExclusionRule *new_rule = (ExclusionRule*)malloc(sizeof(ExclusionRule));
+    if (new_rule == NULL) return;  // Out of memory
+    
+    // Initialize fields
+    new_rule->username = username ? strdup(username) : NULL;
+    new_rule->ip_address = ip_address ? strdup(ip_address) : NULL;
+    
+    // Check for memory allocation failures
+    if ((username && new_rule->username == NULL) || 
+        (ip_address && new_rule->ip_address == NULL)) {
+        if (new_rule->username) free(new_rule->username);
+        if (new_rule->ip_address) free(new_rule->ip_address);
+        free(new_rule);
+        return;  // Out of memory
+    }
+    
+    // Add at the beginning of the list
+    new_rule->next = exclusion_rules_head;
+    exclusion_rules_head = new_rule;
+    
+    // Log the added rule
+    char log_message[256];
+    if (username && ip_address) {
+        snprintf(log_message, sizeof(log_message), 
+                "Added exclusion rule: username=%s, ip=%s", username, ip_address);
+    } else if (username) {
+        snprintf(log_message, sizeof(log_message), 
+                "Added exclusion rule: username=%s (any IP)", username);
+    } else {
+        snprintf(log_message, sizeof(log_message), 
+                "Added exclusion rule: ip=%s (any username)", ip_address);
+    }
+    logAuditEvent("AUDIT", "ADD_EXCLUSION_RULE", log_message);
+}
+
+int isClientExcluded(const char *username, const char *ip_address) {
+    if (username == NULL && ip_address == NULL) {
+        return 0;  // No username or IP - can't match
+    }
+
+    ExclusionRule *current = exclusion_rules_head;
+    while (current != NULL) {
+        // Check username match (if rule has username)
+        int username_match = (current->username == NULL) ||  // Rule doesn't care about username
+                            (username != NULL && strcasecmp(current->username, username) == 0);
+        
+        // Check IP match (if rule has IP)
+        int ip_match = (current->ip_address == NULL) ||  // Rule doesn't care about IP
+                      (ip_address != NULL && strcmp(current->ip_address, ip_address) == 0);
+        
+        // If both username and IP match the rule, client is excluded
+        if (username_match && ip_match) {
+            // Detailed debug logging
+            char match_details[512];
+            snprintf(match_details, sizeof(match_details), 
+                    "Audit exclusion match: client(user=%s, ip=%s) matches rule(user=%s, ip=%s)",
+                    username ? username : "(null)",
+                    ip_address ? ip_address : "(null)",
+                    current->username ? current->username : "(any)",
+                    current->ip_address ? current->ip_address : "(any)");
+            
+            return 1;  // Client should be excluded from audit
+        }
+        
+        current = current->next;
+    }
+    
+    return 0;  // No matching rule found
+}
+
+int isUsernameExcluded(const char *username) {
+    if (username == NULL) {
+        return 0;
+    }
+    
+    return isClientExcluded(username, NULL);
+}
+
+int isIPExcluded(const char *ip_address) {
+    if (ip_address == NULL) {
+        return 0;
+    }
+    
+    return isClientExcluded(NULL, ip_address);
+}
+
+void updateNoAuditFlags() {
+    // Update the no_audit flag for all clients based on current rules
+    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
+        ClientUsernameEntry *current = username_hash[i];
+        while (current != NULL) {
+            // Check if this client matches any exclusion rule
+            current->no_audit = isClientExcluded(current->username, current->ip_address);
+            current = current->next;
+        }
+    }
+}
+
+// Parse the comma-separated rules input and update the exclusion rules list
+void updateExclusionRules(const char *csv_list) {
+    // First, reset all no_audit flags in the client hash table
+    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
+        ClientUsernameEntry *current = username_hash[i];
+        while (current != NULL) {
+            current->no_audit = 0;
+            current = current->next;
+        }
+    }
+    
+    // Clear previous entries in the excluded list
+    freeExclusionRules();
+
+    // If empty list, just return - all flags are already reset
+    if (csv_list == NULL || *csv_list == '\0') return;
+
+    // Make a copy of the list so we can modify it
+    char *list_copy = strdup(csv_list);
+    if (list_copy == NULL) return;
+
+    // Parse the comma-separated values
+    char *token = strtok(list_copy, ",");
+    while (token != NULL) {
+        // Trim whitespace
+        while (*token == ' ') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && *end == ' ') end--;
+        *(end + 1) = '\0';
+
+        // Check if not empty
+        if (*token != '\0') {
+            char *username = NULL;
+            char *ip_address = NULL;
+            
+            // Parse the rule format "username@ip" or just "username" or "@ip"
+            char *at_sign = strchr(token, '@');
+            if (at_sign != NULL) {
+                // We have "@" - split into username and IP parts
+                *at_sign = '\0'; // Split the string
+                
+                // Handle username part (left of @)
+                if (at_sign > token) { // There's something before @
+                    username = token;
+                }
+                
+                // Handle IP part (right of @)
+                if (*(at_sign + 1) != '\0') { // There's something after @
+                    ip_address = at_sign + 1;
+                    
+                    // Validate the IP address
+                    if (!isValidIP(ip_address)) {
+                        // Log invalid IP but continue processing other rules
+                        char log_message[256];
+                        snprintf(log_message, sizeof(log_message), 
+                                "Invalid IP address in exclusion rule: %s", ip_address);
+                        logAuditEvent("AUDIT", "INVALID_IP_ADDRESS", log_message);
+                        
+                        // Skip this rule
+                        token = strtok(NULL, ",");
+                        continue;
+                    }
+                }
+            } else {
+                // No @ sign, treat as username only
+                username = token;
+            }
+            
+            // Add to exclusion rules if at least one part is specified
+            if (username != NULL || ip_address != NULL) {
+                addExclusionRule(username, ip_address);
+                
+                // Update no_audit flags for matching clients
+                updateNoAuditFlags();
+            }
+        }
+
+        token = strtok(NULL, ",");
+    }
+
+    free(list_copy);
+}
+
+
+/////   Section for client hash table functions  /////
+// Find the entry for client_id in the clients hash table
+// Helper function to get client entry from hash table
+ClientUsernameEntry* getClientEntry(uint64_t client_id) {
+    // Get hash index
+    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
+    
+    // Search for the client in the linked list
+    ClientUsernameEntry *entry = username_hash[hash_index];
+    while (entry != NULL) {
+        if (entry->client_id == client_id) {
+            return entry;
+        }
+        entry = entry->next;
+    }
+    
+    // Not found
+    return NULL;
+}
+
+// For backward compatibility if needed
+const char* getClientUsername(uint64_t client_id) {
+    ClientUsernameEntry *entry = getClientEntry(client_id);
+    if (entry != NULL) {
+        return entry->username;
+    }
+    return NULL;
+}
+
+// New helper function to get client IP address
+const char* getClientIPAddress(uint64_t client_id) {
+    ClientUsernameEntry *entry = getClientEntry(client_id);
+    if (entry != NULL && entry->ip_address != NULL) {
+        return entry->ip_address;
+    }
+    return NULL;
+}
+
+// Add or update a client ID to username mapping
+// also set the no_audit flag if the username is to be excluded
+void storeClientInfo(uint64_t client_id, const char *username, const char *ip_address, int no_audit) {
+    // Allocate memory for the new entry
+    ClientUsernameEntry *entry = malloc(sizeof(ClientUsernameEntry));
+    if (entry == NULL) {
+        return;
+    }
+    
+    // Make a copy of the username
+    char *username_copy = strdup(username);
+    if (username_copy == NULL) {
+        // Handle strdup failure
+        free(entry);
+        return;
+    }
+    
+    // Make a copy of the IP address
+    char *ip_copy = NULL;
+    if (ip_address != NULL) {
+        ip_copy = strdup(ip_address);
+        if (ip_copy == NULL) {
+            // Handle strdup failure for IP
+            free(username_copy);
+            free(entry);
+            return;
+        }
+    }
+    
+    // Initialize the entry
+    entry->client_id = client_id;
+    entry->username = username_copy;
+    entry->ip_address = ip_copy;
+    entry->no_audit = no_audit;
+    entry->next = NULL;
+    
+    // Calculate hash value (using simple modulo hash)
+    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
+    
+    // Add to hash table with basic collision handling (linked list chaining)
+    if (username_hash[hash_index] == NULL) {
+        // First entry at this hash index
+        username_hash[hash_index] = entry;
+    } else {
+        // Collision - add to the beginning of the linked list
+        // Check if client_id already exists and update it instead
+        ClientUsernameEntry *current = username_hash[hash_index];
+        ClientUsernameEntry *prev = NULL;
+        
+        while (current != NULL) {
+            if (current->client_id == client_id) {
+                // Client ID already exists - update the entry
+                free(current->username);  // Free the old username
+                current->username = username_copy;
+                
+                // Update IP address
+                if (current->ip_address != NULL) {
+                    free(current->ip_address);
+                }
+                current->ip_address = ip_copy;
+                
+                current->no_audit = no_audit;
+                free(entry);  // Free the unused entry
+                return;
+            }
+            prev = current;
+            current = current->next;
+        }
+        
+        // Add new entry to the end of the list
+        prev->next = entry;
+    }
+}
+
+// Remove a client ID from the hash table
+void removeClientInfo(uint64_t client_id) {
+    // Get hash index
+    unsigned int hash_index = client_id % USERNAME_HASH_SIZE;
+    
+    ClientUsernameEntry *entry = username_hash[hash_index];
+    ClientUsernameEntry *prev = NULL;
+    
+    while (entry) {
+        if (entry->client_id == client_id) {
+            // Found the entry to remove
+            if (prev) {
+                prev->next = entry->next;
+            } else {
+                username_hash[hash_index] = entry->next;
+            }
+            
+            // Free memory
+            free(entry->username);
+            if (entry->ip_address != NULL) {
+                free(entry->ip_address);
+            }
+            free(entry);
+            return;
+        }
+        prev = entry;
+        entry = entry->next;
+    }
+}
+
+// Initialize hash table
+void initClientInfoHashTable() {
+    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; i++) {
+        username_hash[i] = NULL;
+    }
+}
+
+// Clean up hash table memory when shutting down
+void cleanupClientInfoHashTable() {
+    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; i++) {
+        ClientUsernameEntry *current = username_hash[i];
+        while (current != NULL) {
+            ClientUsernameEntry *next = current->next;
+            free(current->username);
+            if (current->ip_address != NULL) {
+                free(current->ip_address);
+            }
+            free(current);
+            current = next;
+        }
+        username_hash[i] = NULL;
+    }
+}
+
+// Print the contents of the user hash table
+void printUserHashContents(ValkeyModuleCtx *ctx) {
+    char buffer[4096] = "User hash table contents:\n";
+    size_t offset = strlen(buffer);
+    size_t remaining = sizeof(buffer) - offset;
+    int empty = 1;
+
+    for (size_t i = 0; i < USERNAME_HASH_SIZE; i++) {
+        ClientUsernameEntry *entry = username_hash[i];
+        
+        while (entry && remaining > 0) {
+            int written = snprintf(buffer + offset, remaining, 
+                                  "Client ID: %llu, Username: %s, NoAudit: %d \n", 
+                                  (unsigned long long)entry->client_id, 
+                                  entry->username ? entry->username : "NULL",
+                                  entry->no_audit);
+            
+            if (written > 0 && (size_t)written < remaining) {
+                offset += written;
+                remaining -= written;
+                empty = 0;
+            } else {
+                // Buffer full
+                break;
+            }
+            
+            entry = entry->next;
+        }
+        
+        if (remaining <= 0) {
+            break;
+        }
+    }
+    
+    if (empty) {
+        strcat(buffer, "  (empty)\n");
+    }
+    
+    // log to server log for admin viewing
+    ValkeyModule_Log(ctx, "notice", "%s", buffer);
+}
+
+// Get client type string
+static const char* getClientTypeStr(ValkeyModuleClientInfo *ci) {
+    if (ci->flags & (1ULL << 0)) return "normal";
+    if (ci->flags & (1ULL << 1)) return "replica";
+    if (ci->flags & (1ULL << 2)) return "pubsub";
+    return "unknown";
+}
+
 /////  Module config  /////
-// Get the protocol configuration string
 ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -936,7 +1154,7 @@ int setAuditEnabled(const char *name, int new_val, void *privdata, ValkeyModuleS
     return VALKEYMODULE_OK;
 }
 
-ValkeyModuleString *getAuditExcludeUsers(const char *name, void *privdata) {
+ValkeyModuleString *getAuditExclusionRules(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
     size_t bufsize = 1024;
@@ -948,14 +1166,17 @@ ValkeyModuleString *getAuditExcludeUsers(const char *name, void *privdata) {
     // Build comma-separated list
     buffer[0] = '\0';
     int first = 1;
-    ExcludedUsernameNode *current = excluded_usernames_head;
+    ExclusionRule *current = exclusion_rules_head;
     
     while (current != NULL) {
-        size_t username_len = strlen(current->username);
+        // Calculate the length needed for this rule entry
+        size_t username_len = current->username ? strlen(current->username) : 0;
+        size_t ip_len = current->ip_address ? strlen(current->ip_address) : 0;
+        size_t entry_len = username_len + ip_len + 2; // +2 for potential @ and comma
         size_t current_len = strlen(buffer);
         
         // Check if we need to resize the buffer
-        if (current_len + username_len + 2 >= bufsize) {
+        if (current_len + entry_len + 1 >= bufsize) {
             bufsize *= 2;
             char *new_buffer = realloc(buffer, bufsize);
             if (new_buffer == NULL) {
@@ -972,8 +1193,19 @@ ValkeyModuleString *getAuditExcludeUsers(const char *name, void *privdata) {
             first = 0;
         }
         
-        // Add the username
-        strcat(buffer, current->username);
+        // Add the rule in format "username@ip" or just "username" or "@ip"
+        if (current->username) {
+            strcat(buffer, current->username);
+        }
+        
+        if (current->ip_address) {
+            strcat(buffer, "@");
+            strcat(buffer, current->ip_address);
+        } else if (!current->username) {
+            // Edge case: if both are NULL (shouldn't happen)
+            strcat(buffer, "@");
+        }
+        
         current = current->next;
     }
     
@@ -983,184 +1215,40 @@ ValkeyModuleString *getAuditExcludeUsers(const char *name, void *privdata) {
     return result;
 }
 
-// Set the excluded users configuration for CONFIG SET
-int setAuditExcludeUsers(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+int setAuditExclusionRules(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
     VALKEYMODULE_NOT_USED(err);
+
     
     size_t len;
     const char *new_list = ValkeyModule_StringPtrLen(new_val, &len);
     
-    // Use the existing updateExcludedUsernames function
-    updateExcludedUsernames(new_list);
+    // Update the exclusion rules
+    updateExclusionRules(new_list);
     
-    // Log the event
-    char details[100];
-    snprintf(details, sizeof(details), "excludeusers=%s", new_list);
-    logAuditEvent("AUDIT", "SET_EXCLUDE_USERS", details);
-    
-    return VALKEYMODULE_OK;
-}
-
-// Command implementation: audit.getconfig
-static int auditGetConfig_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    VALKEYMODULE_NOT_USED(argc);
-    VALKEYMODULE_NOT_USED(argv);
-    ValkeyModule_ReplyWithArray(ctx, 5);
-    
-    // Protocol
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "protocol");
-    if (config.protocol == PROTOCOL_FILE) {
-        ValkeyModule_ReplyWithArray(ctx, 2);
-        ValkeyModule_ReplyWithSimpleString(ctx, "file");
-        ValkeyModuleString *fp = ValkeyModule_CreateString(ctx, 
-            config.file_path ? config.file_path : "",
-            config.file_path ? strlen(config.file_path) : 0);
-        ValkeyModule_ReplyWithString(ctx, fp);
+    // Log the event with truncation for very long lists
+    char details[200];
+    if (len < 180) {
+        snprintf(details, sizeof(details), "excluderules=%s", new_list);
     } else {
-        ValkeyModule_ReplyWithArray(ctx, 2);
-        ValkeyModule_ReplyWithSimpleString(ctx, "syslog");
-        
-        const char *facility;
-        switch (config.syslog_facility) {
-            case LOG_LOCAL0: facility = "local0"; break;
-            case LOG_LOCAL1: facility = "local1"; break;
-            case LOG_LOCAL2: facility = "local2"; break;
-            case LOG_LOCAL3: facility = "local3"; break;
-            case LOG_LOCAL4: facility = "local4"; break;
-            case LOG_LOCAL5: facility = "local5"; break;
-            case LOG_LOCAL6: facility = "local6"; break;
-            case LOG_LOCAL7: facility = "local7"; break;
-            case LOG_USER: facility = "user"; break;
-            case LOG_DAEMON: facility = "daemon"; break;
-            default: facility = "unknown"; break;
-        }
-        ValkeyModule_ReplyWithSimpleString(ctx, facility);
+        // Truncate long lists in the log
+        char truncated[180];
+        strncpy(truncated, new_list, 176);
+        truncated[176] = '\0';
+        strcat(truncated, "...");
+        snprintf(details, sizeof(details), "excluderules=%s", truncated);
     }
-    
-    // Format
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "format");
-    switch (config.format) {
-        case FORMAT_TEXT:
-            ValkeyModule_ReplyWithSimpleString(ctx, "text");
-            break;
-        case FORMAT_JSON:
-            ValkeyModule_ReplyWithSimpleString(ctx, "json");
-            break;
-        case FORMAT_CSV:
-            ValkeyModule_ReplyWithSimpleString(ctx, "csv");
-            break;
-        default:
-            ValkeyModule_ReplyWithSimpleString(ctx, "unknown");
-            break;
-    }
-    
-    // Events
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "events");
-    ValkeyModule_ReplyWithArray(ctx, 4);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "connections");
-    ValkeyModule_ReplyWithLongLong(ctx, (config.event_mask & EVENT_CONNECTIONS) ? 1 : 0);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "auth");
-    ValkeyModule_ReplyWithLongLong(ctx, (config.event_mask & EVENT_AUTH) ? 1 : 0);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "config");
-    ValkeyModule_ReplyWithLongLong(ctx, (config.event_mask & EVENT_CONFIG) ? 1 : 0);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "keys");
-    ValkeyModule_ReplyWithLongLong(ctx, (config.event_mask & EVENT_KEYS) ? 1 : 0);
-    
-    // Payload options
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "payload");
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "disable");
-    ValkeyModule_ReplyWithLongLong(ctx, config.disable_payload);
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "maxsize");
-    ValkeyModule_ReplyWithLongLong(ctx, config.max_payload_size);
-    
-    // Stats
-    ValkeyModule_ReplyWithArray(ctx, 2);
-    ValkeyModule_ReplyWithSimpleString(ctx, "stats");
-    ValkeyModule_ReplyWithSimpleString(ctx, "Not implemented yet");
+    logAuditEvent("AUDIT", "SET_EXCLUDE_RULES", details);
     
     return VALKEYMODULE_OK;
 }
 
-// Command to get connection statistics 
-int GetConnectionStats_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    VALKEYMODULE_NOT_USED(argv);
-    
-    if (argc != 1) {
-        return ValkeyModule_WrongArity(ctx);
-    }
-    
-    ValkeyModule_ReplyWithArray(ctx, 5);
-    
-    // Calculate uptime
-    time_t now = time(NULL);
-    time_t uptime = now - stats.start_time;
-    
-    ValkeyModule_ReplyWithSimpleString(ctx, "total_connections");
-    ValkeyModule_ReplyWithLongLong(ctx, stats.total_connections);
-    
-    ValkeyModule_ReplyWithSimpleString(ctx, "active_connections");
-    ValkeyModule_ReplyWithLongLong(ctx, stats.active_connections);
-    
-    ValkeyModule_ReplyWithSimpleString(ctx, "auth_failures");
-    ValkeyModule_ReplyWithLongLong(ctx, stats.auth_failures);
-  
-    ValkeyModule_ReplyWithSimpleString(ctx, "uptime_seconds");
-    ValkeyModule_ReplyWithLongLong(ctx, uptime);
-    
-    return VALKEYMODULE_OK;
-}
-
-// Reset connection statistics
-int ResetConnectionStats_ValkeyCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    VALKEYMODULE_NOT_USED(argv);
-    
-    if (argc != 1) {
-        return ValkeyModule_WrongArity(ctx);
-    }
-    
-    // Keep active_connections as is, since that's current state
-    int active = stats.active_connections;
-    
-    // Reset stats
-    memset(&stats, 0, sizeof(stats));
-    stats.active_connections = active;
-    stats.start_time = time(NULL);
-    
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
-}
-
-// Command handler for the AUDITUSERS command
-int AuditUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    VALKEYMODULE_NOT_USED(argv);
-    VALKEYMODULE_NOT_USED(argc);
-    
-    printUserHashContents(ctx);
-    
-    // Reply to client
-    ValkeyModule_ReplyWithSimpleString(ctx, "OK - user hash table dumped to logs");
-    
-    return VALKEYMODULE_OK;
-}
-
-
-
-// Clear all excluded users - to be used when the configuration is set to empty
-int clearAuditExcludeUsers(const char *name, void *privdata) {
+// Clear all exclusion rules - to be used when the configuration is set to empty
+int clearAuditExclusionRules(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
+    
     // Reset all no_audit flags in the client hash table
     for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
         ClientUsernameEntry *current = username_hash[i];
@@ -1170,41 +1258,17 @@ int clearAuditExcludeUsers(const char *name, void *privdata) {
         }
     }
     
-    // Free all excluded usernames
-    freeExcludedUsernames();
+    // Free all exclusion rules
+    freeExclusionRules();
     
     // Log the event
-    logAuditEvent("AUDIT", "CLEAR_EXCLUDE_USERS", "");
+    logAuditEvent("AUDIT", "CLEAR_EXCLUDE_RULES", "");
     
-    return VALKEYMODULE_OK;
-}
-
-// Command to process the clear excluded users command
-int AuditExcludeClearCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (argc != 1) {
-        return ValkeyModule_WrongArity(ctx);
-    }
-    VALKEYMODULE_NOT_USED(argv);
-    VALKEYMODULE_NOT_USED(argc);
-
-    // Call freeExcludedUsernames to clear the list
-    freeExcludedUsernames();
-    
-    // Reset all no_audit flags in the client hash table
-    for (unsigned int i = 0; i < USERNAME_HASH_SIZE; ++i) {
-        ClientUsernameEntry *current = username_hash[i];
-        while (current != NULL) {
-            current->no_audit = 0;
-            current = current->next;
-        }
-    }
-    
-    ValkeyModule_ReplyWithSimpleString(ctx, "OK");
     return VALKEYMODULE_OK;
 }
 
 /////  Callback functions  /////
-// Client state change callback
+// Client state change callback, used for connection auditing
 void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
     VALKEYMODULE_NOT_USED(e);
 
@@ -1240,11 +1304,11 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
             temp_username[user_len] = '\0'; // Null-terminate the copy
             username = temp_username;       // Use our copy for the audit message
 
-            // Check if username is in the excluded list
-            int no_audit = isUsernameExcluded(username);
+            // Check if client should be excluded from audit based on username and IP
+            int no_audit = isClientExcluded(username, ci->addr);
             
-            // Store username in hash table - storeClientUsername makes its own copy
-            storeClientUsername(ci->id, username, no_audit);
+            // Store username and IP in hash table - storeClientUsername makes its own copies
+            storeClientInfo(ci->id, username, ci->addr, no_audit);
 
             ValkeyModule_FreeString(ctx, user_str);
         } else {
@@ -1259,27 +1323,29 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
                 ValkeyModule_Log(ctx, "warning", "Unknown error getting client username: %d", errno);
             }
 
-            // Store placeholder in hash table
-            storeClientUsername(ci->id, username, 0);
+            // Store placeholder in hash table with IP address
+            storeClientInfo(ci->id, username, ci->addr, 0);
         }
     } else if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED) {
-        // For disconnection, make a copy of the username from the hash
-        const char *stored_username = getClientUsername(ci->id);
-        if (stored_username != NULL) {
+        // For disconnection, get the client info from the hash table
+        ClientUsernameEntry *entry = getClientEntry(ci->id);
+        if (entry != NULL) {
             // Make a copy of the username before we remove it from the hash
-            temp_username = strdup(stored_username);
-            if (temp_username != NULL) {
-                username = temp_username;
-            } else {
-                ValkeyModule_Log(ctx, "warning", "Failed to allocate memory for username during disconnection");
-                username = "memory-error";
+            if (entry->username != NULL) {
+                temp_username = strdup(entry->username);
+                if (temp_username != NULL) {
+                    username = temp_username;
+                } else {
+                    ValkeyModule_Log(ctx, "warning", "Failed to allocate memory for username during disconnection");
+                    username = "memory-error";
+                }
             }
         } else {
             username = "unknown"; // Fallback if not found in hash
         }
         
         // Client disconnected - remove from hash table
-        removeClientUsername(ci->id);
+        removeClientInfo(ci->id);
     }
     
     // Format the audit message with username information
@@ -1317,11 +1383,14 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
     // Get client information
     uint64_t client_id = ValkeyModule_GetClientId(ctx);
     char client_info[256] = "unknown";
+    char client_ip[128] = "unknown"; 
 
     // Try to get client info if available
     ValkeyModuleClientInfo client = VALKEYMODULE_CLIENTINFO_INITIALIZER_V1;
-    if (ValkeyModule_GetClientInfoById( &client_id, client_id) == VALKEYMODULE_OK) {
+    if (ValkeyModule_GetClientInfoById(&client, client_id) == VALKEYMODULE_OK) {
         snprintf(client_info, sizeof(client_info), "%s:%d", client.addr, client.port);
+        strncpy(client_ip, client.addr, sizeof(client_ip) - 1);
+        client_ip[sizeof(client_ip) - 1] = '\0'; // Ensure null termination
     }
 
     // Format audit message for auth attempt
@@ -1336,9 +1405,9 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
     // Update the username in our hash table if the auth will succeed
     // We don't know yet if it will succeed, but we store it anyway and let
     // the normal AUTH mechanism decide
-    // First check if username is in the excluded list and store
-    int no_audit = isUsernameExcluded(username_str);
-    storeClientUsername(client_id, username_str, no_audit);
+    // Check if client should be excluded based on username and IP
+    int no_audit = isClientExcluded(username_str, client_ip);
+    storeClientInfo(client_id, username_str, client_ip, no_audit);
 
     // We're just logging, not making auth decisions, so pass through
     return VALKEYMODULE_AUTH_NOT_HANDLED;
@@ -1351,13 +1420,15 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
     int no_audit = 0;
     char *username = "default";
+    char *ip_address = "unknown";
     ClientUsernameEntry *entry = getClientEntry(client);
 
-    // Check if this user is excluded from being audited
+    // Check if this client is excluded from being audited
     if (entry != NULL) {
-        // Get the no_audit flag directly from the stored entry
+        // Get the no_audit flag and other info directly from the stored entry
         no_audit = entry->no_audit;
         username = entry->username;
+        ip_address = entry->ip_address;
     }
     if (no_audit) return;  
 
@@ -1421,6 +1492,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     char details[2048] = "";
     char client_info[128] = "";
     char username_info[128] = "";
+    char ip_info[128] = "";
     
     // Add client ID to details
     if (client) {
@@ -1430,6 +1502,10 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     if (username) {
         snprintf(username_info, sizeof(username_info), " username=%s", username);
         strncat(details, username_info, sizeof(details) - strlen(details) - 1);
+    }
+    if (ip_address) {
+        snprintf(ip_info, sizeof(ip_info), " ip=%s", ip_address);
+        strncat(details, ip_info, sizeof(details) - strlen(details) - 1);
     }
     
     // For CONFIG commands, add the subcommand and parameter
@@ -1535,6 +1611,19 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     
     // Log the audit event
     logAuditEvent(category_str, command_str, details);
+}
+// to be removed
+// Command handler for the AUDITUSERS command
+int AuditUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    VALKEYMODULE_NOT_USED(argv);
+    VALKEYMODULE_NOT_USED(argc);
+    
+    printUserHashContents(ctx);
+    
+    // Reply to client
+    ValkeyModule_ReplyWithSimpleString(ctx, "OK - user hash table dumped to logs");
+    
+    return VALKEYMODULE_OK;
 }
 
 /////  Module init and shutdown  /////
@@ -1730,9 +1819,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterStringConfig(ctx, "excludeusers", "", 
+    if (ValkeyModule_RegisterStringConfig(ctx, "excluderules", "", 
             VALKEYMODULE_CONFIG_DEFAULT,
-            getAuditExcludeUsers, setAuditExcludeUsers, 
+            getAuditExclusionRules, setAuditExclusionRules, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
@@ -1754,13 +1843,6 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     if (ValkeyModule_CreateCommand(ctx, "auditusers", 
             AuditUsersCommand,
             "admin no-cluster", 0, 0, 0) == VALKEYMODULE_ERR) {
-        return VALKEYMODULE_ERR;
-    }
-
-    // Register audit.getconfig command
-    if (ValkeyModule_CreateCommand(ctx, "audit.getconfig",
-            auditGetConfig_ValkeyCommand,
-            "admin readonly", 0, 0, 0) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 

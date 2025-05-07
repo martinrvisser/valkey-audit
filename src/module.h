@@ -46,9 +46,16 @@ typedef struct ConnectionStats {
 typedef struct ClientUsernameEntry {
     uint64_t client_id;
     char *username;
+    char *ip_address;
     int no_audit; // indicator if the user's commands should not be logged
     struct ClientUsernameEntry *next;
 } ClientUsernameEntry;
+
+typedef struct ExclusionRule {
+    char *username;     // Can be NULL for IP-only rules
+    char *ip_address;   // Can be NULL for username-only rules
+    struct ExclusionRule *next;
+} ExclusionRule;
 
 // Structure to hold excluded usernames in a linked list
 typedef struct ExcludedUsernameNode {
