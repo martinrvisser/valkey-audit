@@ -794,6 +794,7 @@ static const char* getClientTypeStr(ValkeyModuleClientInfo *ci) {
 }
 
 /////  Module config  /////
+// Protocol
 ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -937,7 +938,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
     }
 }
 
-// Format config get function
+// Format
 ValkeyModuleString *getAuditFormat(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -961,7 +962,6 @@ ValkeyModuleString *getAuditFormat(const char *name, void *privdata) {
     return ValkeyModule_CreateString(NULL, formatString, strlen(formatString));
 }
 
-// Format config set function
 int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -987,8 +987,7 @@ int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata
     }
 }
 
-// Command implementation: audit.setevents
-// Get the events configuration
+// Events
 ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -1093,15 +1092,13 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     return VALKEYMODULE_OK;
 }
 
-// Command implementation: audit.setpayloadoptions
-// Get the payload disable configuration
+// Payload
 int getAuditPayloadDisable(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
     return config.disable_payload;
 }
 
-// Set the payload disable configuration
 int setAuditPayloadDisable(const char *name, int new_val, void *privdata, ValkeyModuleString **err) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -1115,14 +1112,12 @@ int setAuditPayloadDisable(const char *name, int new_val, void *privdata, Valkey
     return VALKEYMODULE_OK;
 }
 
-// Get the payload maxsize configuration
 long long getAuditPayloadMaxSize(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
     return config.max_payload_size;
 }
 
-// Set the payload maxsize configuration
 int setAuditPayloadMaxSize(const char *name, long long new_val, void *privdata, ValkeyModuleString **err) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -1140,6 +1135,7 @@ int setAuditPayloadMaxSize(const char *name, long long new_val, void *privdata, 
     return VALKEYMODULE_OK;
 }
 
+// Enabled
 int getAuditEnabled(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -1154,6 +1150,23 @@ int setAuditEnabled(const char *name, int new_val, void *privdata, ValkeyModuleS
     return VALKEYMODULE_OK;
 }
 
+// Config cmd auditing enabled
+int getAuditAlwaysAuditConfig(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    return config.always_audit_config;
+}
+
+int setAuditAlwaysAuditConfig(const char *name, int new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
+    config.always_audit_config = new_val;
+    return VALKEYMODULE_OK;   
+}
+
+
+// Exclusion
 ValkeyModuleString *getAuditExclusionRules(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
@@ -1266,6 +1279,8 @@ int clearAuditExclusionRules(const char *name, void *privdata) {
     
     return VALKEYMODULE_OK;
 }
+
+
 
 /////  Callback functions  /////
 // Client state change callback, used for connection auditing
@@ -1416,24 +1431,8 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
 void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     if (config.enabled!=1) return;
 
-    // Get client info
-    unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
-    int no_audit = 0;
-    char *username = "default";
-    char *ip_address = "unknown";
-    ClientUsernameEntry *entry = getClientEntry(client);
-
-    // Check if this client is excluded from being audited
-    if (entry != NULL) {
-        // Get the no_audit flag and other info directly from the stored entry
-        no_audit = entry->no_audit;
-        username = entry->username;
-        ip_address = entry->ip_address;
-    }
-    if (no_audit) return;  
-
-    // Get command name (first argument)
-    size_t cmd_len;
+     // Get command name
+    size_t cmd_len; 
     const ValkeyModuleString *cmd_arg = ValkeyModule_CommandFilterArgGet(filter, 0);
     if (cmd_arg == NULL) return; // No command to audit
     
@@ -1444,15 +1443,37 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         return;
     }
     
-    // Determine command category
+    // Early check for CONFIG commands with always_audit_config enabled
+    int is_config_cmd = strcasecmp(cmd_str, "config") == 0;
+    
+    // Get client info
+    unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
+    int no_audit = 0;
+    char *username = "default";
+    char *ip_address = "unknown";
+    ClientUsernameEntry *entry = getClientEntry(client);
+    
+    // Always get client info if available, for logging purposes
+    if (entry != NULL) {
+        username = entry->username;
+        ip_address = entry->ip_address;
+        
+        // Only set no_audit flag if it's not a CONFIG command with always_audit_config enabled
+        if (!(is_config_cmd && config.always_audit_config)) {
+            no_audit = entry->no_audit;
+        }
+    }
+    
+    // Skip auditing if no_audit is set and it's not a special case
+    if (no_audit) return;
+    
+    // Determine command category : config command determined early for exclusion
     int category_match = 0;
-    int is_config_cmd = 0;
     int is_key_cmd = 0;
     int is_auth_cmd = 0;
     
     // Check if it's a CONFIG command
-    if (strcasecmp(cmd_str, "config") == 0) {
-        is_config_cmd = 1;
+    if (is_config_cmd) {
         // Only audit CONFIG if enabled
         if (config.event_mask & EVENT_CONFIG) {
             category_match = 1;
@@ -1612,6 +1633,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     // Log the audit event
     logAuditEvent(category_str, command_str, details);
 }
+
 // to be removed
 // Command handler for the AUDITUSERS command
 int AuditUsersCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -1826,10 +1848,16 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
-    // Boolean config example
     if (ValkeyModule_RegisterBoolConfig(ctx, "enabled", 1, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditEnabled, setAuditEnabled, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    if (ValkeyModule_RegisterBoolConfig(ctx, "always_audit_config", 1, 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditAlwaysAuditConfig, setAuditAlwaysAuditConfig,
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }

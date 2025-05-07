@@ -85,15 +85,17 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
     @classmethod
     def _stop_valkey_server(cls):
         """Stop the Valkey server"""
+        cls.redis_admin.execute_command("ACL","SAVE")
+        cls.redis_admin.execute_command("CONFIG","REWRITE")
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
         
         # Remove the temporary ACL file
-        try:
-            os.remove("/tmp/valkey-acl-test.acl")
-        except:
-            pass
+        #try:
+        #    os.remove("/tmp/valkey-acl-test.acl")
+        #except:
+        #    pass
     
     @classmethod
     def _create_test_users(cls):
@@ -371,5 +373,99 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         non_excluded_key_logged = any(f"non_excluded_key" in line for line in log_lines)
         self.assertTrue(non_excluded_key_logged, "Non-excluded user's key operation was not logged")
 
+    def test_010_always_audit_config_commands(self):
+        """Test that CONFIG commands are always audited when always_audit_config is enabled"""
+        # Set format to text for easier parsing
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
+        
+        # Enable all event types
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
+        
+        # Exclude user1 from audit
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", self.user1)
+        
+        # Ensure always_audit_config is enabled (default)
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.ALWAYS_AUDIT_CONFIG", "yes")
+        
+        # Clear log file
+        self._clear_log_file()
+        self.redis_admin.execute_command("auditusers")
+
+        # Execute normal and CONFIG commands as excluded user
+        self.redis_user1.set("excluded_key", "value")  # This should NOT be logged
+        
+        # Execute a CONFIG command as excluded user (may require privileges)
+        try:
+            self.redis_user1.execute_command("CONFIG", "GET", "port")  # This should be logged despite exclusion
+        except:
+            pass  # Might fail if user doesn't have permission, but should still attempt
+        
+        # Read log file
+        log_lines = self._read_log_file()
+        
+        # Check normal command is NOT logged (user is excluded)
+        normal_cmd_logged = any(f"excluded_key" in line for line in log_lines)
+        self.assertFalse(normal_cmd_logged, "Excluded user's normal command was logged")
+        
+        # Check CONFIG command IS logged despite user exclusion
+        config_cmd_logged = any(f"CONFIG" in line and self.user1 in line for line in log_lines)
+        self.assertTrue(config_cmd_logged, "Excluded user's CONFIG command was not logged despite always_audit_config=yes")
+        
+        # Now disable always_audit_config
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.ALWAYS_AUDIT_CONFIG", "no")
+        
+        # Clear log file
+        self._clear_log_file()
+        
+        # Execute CONFIG command again
+        try:
+            self.redis_user1.execute_command("CONFIG", "GET", "port")  # This should NOT be logged now
+        except:
+            pass
+        
+        # Read log file
+        log_lines = self._read_log_file()
+        
+        # Check CONFIG command is NOT logged when always_audit_config is disabled
+        config_cmd_logged = any(f"CONFIG" in line and self.user1 in line for line in log_lines)
+        self.assertFalse(config_cmd_logged, "Excluded user's CONFIG command was logged despite always_audit_config=no")
+
+    def test_011_always_audit_config_with_ip_exclusion(self):
+        """Test always_audit_config with IP-based exclusion"""
+        # Set format to text for easier parsing
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.FORMAT", "text")
+        
+        # Enable all event types
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
+        
+        # Exclude localhost IP address
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.EXCLUDERULES", "@127.0.0.1")
+        
+        # Ensure always_audit_config is enabled
+        self.redis_admin.execute_command("CONFIG","SET","AUDIT.ALWAYS_AUDIT_CONFIG", "yes")
+        
+        # Clear log file
+        self._clear_log_file()
+        
+        # Execute normal and CONFIG commands
+        self.redis_user1.set("ip_excluded_key", "value")  # This should NOT be logged
+        
+        # Execute a CONFIG command (may require privileges)
+        try:
+            self.redis_user1.execute_command("CONFIG", "GET", "port")  # This should be logged despite IP exclusion
+        except:
+            pass
+        
+        # Read log file
+        log_lines = self._read_log_file()
+        
+        # Check normal command is NOT logged (IP is excluded)
+        normal_cmd_logged = any(f"ip_excluded_key" in line for line in log_lines)
+        self.assertFalse(normal_cmd_logged, "Command from excluded IP was logged")
+        
+        # Check CONFIG command IS logged despite IP exclusion
+        config_cmd_logged = any(f"CONFIG" in line for line in log_lines)
+        self.assertTrue(config_cmd_logged, "CONFIG command from excluded IP was not logged despite always_audit_config=yes")
+    
 if __name__ == "__main__":
     unittest.main(verbosity=2)

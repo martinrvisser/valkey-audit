@@ -293,7 +293,7 @@ def test_006_get_config(self):
     config = self.redis.execute_command("CONFIG GET AUDIT.*")
     
     # Check structure - Redis returns flat key-value pairs
-    self.assertEqual(len(config), 14, "Config should have 14 items")
+    self.assertEqual(len(config), 16, "Config should have 16 items")
     
     # Convert flat array to dictionary (every two elements form a key-value pair)
     config_dict = {}
@@ -308,6 +308,7 @@ def test_006_get_config(self):
     
     # Check for required configurations
     self.assertIn("audit.enabled", config_dict, "Missing audit.enabled config")
+    self.assertIn("audit.always_audit_config", config_dict, "Missing audit.always_audit_config config")
     self.assertIn("audit.events", config_dict, "Missing audit.events config")
     self.assertIn("audit.format", config_dict, "Missing audit.format config")
     self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
@@ -335,6 +336,10 @@ def test_006_get_config(self):
     # Check audit is enabled
     self.assertEqual(config_dict["audit.enabled"], "yes",
                      "Audit should be enabled")
-
+    
+    # Check always_audit_config is enabled
+    self.assertEqual(config_dict["audit.always_audit_config"], "yes",
+                     "always_audit_config should be enabled")
+    
 if __name__ == "__main__":
     unittest.main(verbosity=2)

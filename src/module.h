@@ -33,6 +33,7 @@ typedef struct AuditConfig {
     int syslog_facility;
     int syslog_priority;
     int file_fd;
+    int always_audit_config;
 } AuditConfig;
 
 typedef struct ConnectionStats {
