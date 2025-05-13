@@ -16,7 +16,7 @@ jobs:
 
             - name: Install dependencies
               run: |
-                sudo yum install -y valkey-devel cmake make clang clang-tools-extra 
+                sudo yum install -y valkey-devel cmake make clang clang-tools-extra git
             - name: Build Module
               run: |
                 mkdir -p build
