@@ -22,10 +22,11 @@ cmake --build build --target all
 
 ### Loading the Module
 
-Add the following line to your Valkey configuration file or issue a MODULE LOAD command.
+Add the following line to your Valkey configuration file or issue a MODULE LOAD command. As part of the loadmodule, any of the configuration parameters can be set. Examples:
 
 ```
 loadmodule /path/to/libvalkeyaudit.so
+loadmodule /path/to/libvalkeyaudit.so protocol file /var/log/audit/valkey_audit.log
 ```
 
 ### Configuring the Module
@@ -33,6 +34,7 @@ The module uses the standard Valkey configuration facility which means that para
 
 Available parameters:
 - `audit.enable [yes|no]`: Enable or disable auditing.
+- `audit.always_audit_config [yes|no]`: Enable or disable the auditing of config commands regardless of per user events setting. This allows the logging of config commands for a user even if the user is in the exclusion list.
 - `audit.protocol [file|syslog]`: Logging protocol to use. 
     When using the file protocol it should be followed by the filepath.
     When using the syslog protocol it should be followed by the syslog facility.
@@ -40,7 +42,7 @@ Available parameters:
 - `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys).
 - `audit.payload_disable`: Disable logging command payloads.
 - `audit.payload_maxsize [size]`: Maximum payload size to log in bytes.
-- `audit.excludeusers`: Specific usernames to exclude from auditing.
+- `audit.excluderules`: Specific usernames and/or IP addresses to exclude from auditing.
 
 ## Example Usage
 
@@ -50,6 +52,13 @@ To enable/disable auditing:
 ```
 CONFIG SET AUDIT.ENABLE yes
 CONFIG SET AUDIT.ENABLE no
+```
+
+To enable/disable always auditing of config commands:
+
+```
+CONFIG SET AUDIT.ALWAYS_AUDIT_CONFIG yes
+CONFIG SET AUDIT.ALWAYS_AUDIT_CONFIG no
 ```
 
 ### protocol
@@ -110,18 +119,25 @@ To retrieve the current specific audit configuration parameter:
 CONFIG GET AUDIT.FORMAT 
 ```
 
-### audit.setexcludeusers
+### excluding users and/or IP addresses
 
-Set usernames to be excluded from auditing through a comma-separated list:
+Rules to set usernames and/or IP addresses to be excluded from auditing through a comma-separated list. The rule formats are :
+```
+username            # for username-only exclusion
+@ipaddress          # for IPaddress-only exclusion
+username@ipaddress  # combination exclusion
+```
+
+Example
 
 ```
-CONFIG SET AUDIT.EXCLUDEUSERS "un1,un2"
+CONFIG SET AUDIT.EXCLUDERULES "un1,@192.168.1.12,un2@192.168.1.22"
 ```
 
-To remove the current list of usernames to be excluded from auditing:
+To remove the current list of exclusion rules
 
 ```
-CONFIG SET AUDIT.EXCLUDEUSERS ""
+CONFIG SET AUDIT.EXCLUDERULES ""
 ```
 
 ## Manual Module Testing
