@@ -1,5 +1,6 @@
 #include "valkeymodule.h"
 #include "module.h"
+#include "version.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+
 
 static AuditConfig config = {
     .enabled = 1,
@@ -437,31 +439,37 @@ int isClientExcluded(const char *username, const char *ip_address) {
 
     ExclusionRule *current = exclusion_rules_head;
     while (current != NULL) {
-        // Check username match (if rule has username)
-        int username_match = (current->username == NULL) ||  // Rule doesn't care about username
-                            (username != NULL && strcasecmp(current->username, username) == 0);
-        
-        // Check IP match (if rule has IP)
-        int ip_match = (current->ip_address == NULL) ||  // Rule doesn't care about IP
-                      (ip_address != NULL && strcmp(current->ip_address, ip_address) == 0);
-        
-        // If both username and IP match the rule, client is excluded
-        if (username_match && ip_match) {
-            // Detailed debug logging
-            char match_details[512];
-            snprintf(match_details, sizeof(match_details), 
-                    "Audit exclusion match: client(user=%s, ip=%s) matches rule(user=%s, ip=%s)",
-                    username ? username : "(null)",
-                    ip_address ? ip_address : "(null)",
-                    current->username ? current->username : "(any)",
-                    current->ip_address ? current->ip_address : "(any)");
-            
-            return 1;  // Client should be excluded from audit
+        // Check if this rule applies to the client
+
+        // Case 1: Rule is username-only (no IP specified in rule)
+        if (current->username != NULL && current->ip_address == NULL) {
+            // Check if username matches
+            if (username != NULL && strcasecmp(current->username, username) == 0) {
+                return 1;  // Client should be excluded from audit
+            }
         }
-        
+
+        // Case 2: Rule is IP-only (no username specified in rule)
+        else if (current->username == NULL && current->ip_address != NULL) {
+            // Check if IP matches
+            if (ip_address != NULL && strcmp(current->ip_address, ip_address) == 0) {
+                return 1;  // Client should be excluded from audit
+            }
+        }
+
+        // Case 3: Rule is both username and IP
+        else if (current->username != NULL && current->ip_address != NULL) {
+            // Both username AND IP must match
+            if (username != NULL && ip_address != NULL && 
+                strcasecmp(current->username, username) == 0 && 
+                strcmp(current->ip_address, ip_address) == 0) {
+                return 1;  // Client should be excluded from audit
+            }
+        }
+
         current = current->next;
     }
-    
+
     return 0;  // No matching rule found
 }
 
@@ -755,9 +763,10 @@ void printUserHashContents(ValkeyModuleCtx *ctx) {
         
         while (entry && remaining > 0) {
             int written = snprintf(buffer + offset, remaining, 
-                                  "Client ID: %llu, Username: %s, NoAudit: %d \n", 
+                                  "Client ID: %llu, Username: %s, IP: %s, NoAudit: %d \n", 
                                   (unsigned long long)entry->client_id, 
                                   entry->username ? entry->username : "NULL",
+                                  entry->ip_address,
                                   entry->no_audit);
             
             if (written > 0 && (size_t)written < remaining) {
@@ -1285,7 +1294,7 @@ int clearAuditExclusionRules(const char *name, void *privdata) {
 void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
     VALKEYMODULE_NOT_USED(e);
 
-    if (config.enabled!=1) return;
+    if ((config.enabled!=1) || !(config.event_mask & EVENT_CONNECTIONS)) return;
 
     ValkeyModuleClientInfo *ci = data;
     const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ? 
@@ -1454,16 +1463,18 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     if (entry != NULL) {
         username = entry->username;
         ip_address = entry->ip_address;
-        
-        // Only set no_audit flag if it's not a CONFIG command with always_audit_config enabled
-        if (!(is_config_cmd && config.always_audit_config)) {
-            no_audit = entry->no_audit;
-        }
+        no_audit = entry->no_audit;
     }
     
-    // Skip auditing if no_audit is set and it's not a special case
-    if (no_audit) return;
-    
+    // Skip auditing if no_audit is set and it's not a special case:
+    //   it's not a CONFIG command with always_audit_config enabled
+    if (no_audit) {
+        if (!(is_config_cmd && config.always_audit_config))
+        {
+            return;
+        }
+    }
+
     // Determine command category : config command determined early for exclusion
     int category_match = 0;
     int is_key_cmd = 0;
@@ -1655,28 +1666,73 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
         size_t arglen;
         const char *arg = ValkeyModule_StringPtrLen(argv[i], &arglen);
         
+        // Handle enable argument
+        if (i < argc-1 && strcasecmp(arg, "enable") == 0) {
+            const char *enabled = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;
+        
+            if (strcasecmp(enabled, "yes") == 0 || strcasecmp(enabled, "1") == 0) {
+                config.enabled = 1;
+            } else if (strcasecmp(enabled, "no") == 0 || strcasecmp(enabled, "0") == 0) {
+                config.enabled = 0;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown value for enable '%s', using default", enabled);
+            }
+        }
+        // Handle always_audit_config argument 
+        if (i < argc-1 && strcasecmp(arg, "always_audit_config") == 0) {
+            const char *always_audit_config = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;
+        
+            if (strcasecmp(always_audit_config, "yes") == 0 || strcasecmp(always_audit_config, "1") == 0) {
+                config.always_audit_config = 1;
+            } else if (strcasecmp(always_audit_config, "no") == 0 ||    strcasecmp(always_audit_config, "0") == 0){
+                config.always_audit_config = 0;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown value for always_audit_config '%s', using default", always_audit_config);
+            }
+        }
         // Handle protocol argument
-        if (i < argc-1 && strcasecmp(arg, "protocol") == 0) {
+        else if (i < argc-1 && strcasecmp(arg, "protocol") == 0) {
             const char *protocol = ValkeyModule_StringPtrLen(argv[i+1], NULL);
-            i++;  // Skip the next argument since we processed it
+            i++;  // Skip the protocol argument since we processed it
             
             if (strcasecmp(protocol, "file") == 0) {
                 config.protocol = PROTOCOL_FILE;
+                
+                // Check if there's another argument available for filepath
+                if (i < argc-1) {
+                    config.file_path = strdup(ValkeyModule_StringPtrLen(argv[i+1], NULL));
+                    i++;  // Skip the filepath argument
+                } else {
+                    ValkeyModule_Log(ctx, "warning", "Missing filepath for file protocol, using default");
+                }
             } else if (strcasecmp(protocol, "syslog") == 0) {
                 config.protocol = PROTOCOL_SYSLOG;
+                
+                // Check if there's another argument available for syslog-facility
+                if (i < argc-1) {
+                    const char *facility = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+                    if (strcasecmp(facility, "local0") == 0) config.syslog_facility = LOG_LOCAL0;
+                    else if (strcasecmp(facility, "local1") == 0) config.syslog_facility = LOG_LOCAL1;
+                    else if (strcasecmp(facility, "local2") == 0) config.syslog_facility = LOG_LOCAL2;
+                    else if (strcasecmp(facility, "local3") == 0) config.syslog_facility = LOG_LOCAL3;
+                    else if (strcasecmp(facility, "local4") == 0) config.syslog_facility = LOG_LOCAL4;
+                    else if (strcasecmp(facility, "local5") == 0) config.syslog_facility = LOG_LOCAL5;
+                    else if (strcasecmp(facility, "local6") == 0) config.syslog_facility = LOG_LOCAL6;
+                    else if (strcasecmp(facility, "local7") == 0) config.syslog_facility = LOG_LOCAL7;
+                    else if (strcasecmp(facility, "user") == 0) config.syslog_facility = LOG_USER;
+                    else if (strcasecmp(facility, "daemon") == 0) config.syslog_facility = LOG_DAEMON;
+                    else {
+                        ValkeyModule_Log(ctx, "warning", "Unknown syslog facility '%s', using default", facility);
+                    }
+                    i++;
+                } else {
+                    ValkeyModule_Log(ctx, "warning", "Missing syslog-facility for syslog protocol, using default");
+                }
             } else {
                 ValkeyModule_Log(ctx, "warning", "Unknown protocol '%s', using default", protocol);
             }
-        }
-        // Handle logfile argument
-        else if (i < argc-1 && strcasecmp(arg, "logfile") == 0) {
-            const char *logfile = ValkeyModule_StringPtrLen(argv[i+1], NULL);
-            i++;  // Skip the next argument since we processed it
-            
-            if (config.file_path) {
-                free(config.file_path);
-            }
-            config.file_path = strdup(logfile);
         }
         // Handle format argument
         else if (i < argc-1 && strcasecmp(arg, "format") == 0) {
@@ -1693,30 +1749,11 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                 ValkeyModule_Log(ctx, "warning", "Unknown format '%s', using default", format);
             }
         }
-        // Handle syslog facility argument
-        else if (i < argc-1 && strcasecmp(arg, "syslog-facility") == 0) {
-            const char *facility = ValkeyModule_StringPtrLen(argv[i+1], NULL);
-            i++;  // Skip the next argument since we processed it
-            
-            if (strcasecmp(facility, "local0") == 0) config.syslog_facility = LOG_LOCAL0;
-            else if (strcasecmp(facility, "local1") == 0) config.syslog_facility = LOG_LOCAL1;
-            else if (strcasecmp(facility, "local2") == 0) config.syslog_facility = LOG_LOCAL2;
-            else if (strcasecmp(facility, "local3") == 0) config.syslog_facility = LOG_LOCAL3;
-            else if (strcasecmp(facility, "local4") == 0) config.syslog_facility = LOG_LOCAL4;
-            else if (strcasecmp(facility, "local5") == 0) config.syslog_facility = LOG_LOCAL5;
-            else if (strcasecmp(facility, "local6") == 0) config.syslog_facility = LOG_LOCAL6;
-            else if (strcasecmp(facility, "local7") == 0) config.syslog_facility = LOG_LOCAL7;
-            else if (strcasecmp(facility, "user") == 0) config.syslog_facility = LOG_USER;
-            else if (strcasecmp(facility, "daemon") == 0) config.syslog_facility = LOG_DAEMON;
-            else {
-                ValkeyModule_Log(ctx, "warning", "Unknown syslog facility '%s', using default", facility);
-            }
-        }
         // Handle events argument
         else if (i < argc-1 && strcasecmp(arg, "events") == 0) {
             const char *events = ValkeyModule_StringPtrLen(argv[i+1], NULL);
-            i++;  // Skip the next argument since we processed it
-            
+            i++;
+
             // Parse comma-separated event list
             config.event_mask = 0;  // Reset events
             
@@ -1745,12 +1782,20 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
             
             free(events_copy);
         }
+        // Handle excluderules argument
+        else if (i < argc-1 && strcasecmp(arg, "excluderules") == 0) {
+            const char *exclude_rules = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;  // Skip the next argument since we processed it
+            
+            // Update the exclusion rules
+            updateExclusionRules(exclude_rules);
+        }
         // Handle disable-payload argument
-        else if (strcasecmp(arg, "disable-payload") == 0) {
+        else if (strcasecmp(arg, "payload_disable") == 0) {
             config.disable_payload = 1;
         }
         // Handle max-payload-size argument
-        else if (i < argc-1 && strcasecmp(arg, "max-payload-size") == 0) {
+        else if (i < argc-1 && strcasecmp(arg, "payload_maxsize") == 0) {
             const char *size_str = ValkeyModule_StringPtrLen(argv[i+1], NULL);
             i++;  // Skip the next argument since we processed it
             
@@ -1784,14 +1829,20 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
 
 // Register the commands, connection callback and command filter functions
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (ValkeyModule_Init(ctx,"audit",1,VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR) 
+    if (ValkeyModule_Init(ctx,"audit",VALKEYAUDIT_MODULE_VERSION,VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR) 
         return VALKEYMODULE_ERR;
+    
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), 
+                "valkey-audit version: %s",
+                VALKEYAUDIT_MODULE_VERSION_STR);
+    ValkeyModule_Log(ctx, "notice", "%s", buffer);
 
     // Initialize the audit module with passed arguments
     if (initAuditModule(ctx, argv, argc) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }  
-    
+
     // Initialize stats
     stats.start_time = time(NULL);
 
@@ -1801,35 +1852,64 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     }
 
     // Register module configurations
-    if (ValkeyModule_RegisterStringConfig(ctx, "protocol", "file audit.log", 
+    char default_protocol[256]; // Adjust buffer size as needed
+    snprintf(default_protocol, sizeof(default_protocol), "file %s", config.file_path);
+    if (ValkeyModule_RegisterStringConfig(ctx, "protocol", default_protocol, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditProtocol, setAuditProtocol, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterStringConfig(ctx, "format", "json", 
+    const char* format_strings[] = {
+        "text",   // FORMAT_TEXT (0)
+        "json",   // FORMAT_JSON (1)
+        "csv",    // FORMAT_CSV (2)
+    };
+    const char* default_format = format_strings[config.format];
+
+    if (ValkeyModule_RegisterStringConfig(ctx, "format", default_format, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditFormat, setAuditFormat, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterStringConfig(ctx, "events", "all", 
+    // Create a string representation of the default event mask
+    char default_events[256] = "";
+    if (config.event_mask & EVENT_CONNECTIONS) {
+        strcat(default_events, "connections,");
+    }
+    if (config.event_mask & EVENT_AUTH) {
+        strcat(default_events, "auth,");
+    }
+    if (config.event_mask & EVENT_CONFIG) {
+        strcat(default_events, "config,");
+    }
+    if (config.event_mask & EVENT_KEYS) {
+        strcat(default_events, "keys,");
+    }
+
+    // Remove trailing space if any events were added
+    if (default_events[0] != '\0') {
+        default_events[strlen(default_events)-1] = '\0';
+    }
+
+    if (ValkeyModule_RegisterStringConfig(ctx, "events", default_events, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditEvents, setAuditEvents, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterBoolConfig(ctx, "payload_disable", 0, 
+    if (ValkeyModule_RegisterBoolConfig(ctx, "payload_disable", config.disable_payload, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditPayloadDisable, setAuditPayloadDisable, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterNumericConfig(ctx, "payload_maxsize", 1024,  // Default 1024
+    if (ValkeyModule_RegisterNumericConfig(ctx, "payload_maxsize", config.max_payload_size,
            VALKEYMODULE_CONFIG_DEFAULT,
            0,            // Minimum value
            LLONG_MAX,    // Maximum value
@@ -1838,21 +1918,24 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterStringConfig(ctx, "excluderules", "", 
+    ValkeyModuleString *initial_rules = getAuditExclusionRules("excluderules", NULL);
+    const char *default_val = ValkeyModule_StringPtrLen(initial_rules, NULL);
+    if (ValkeyModule_RegisterStringConfig(ctx, "excluderules", default_val, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditExclusionRules, setAuditExclusionRules, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
+    ValkeyModule_FreeString(ctx, initial_rules);
 
-    if (ValkeyModule_RegisterBoolConfig(ctx, "enabled", 1, 
+    if (ValkeyModule_RegisterBoolConfig(ctx, "enabled", config.enabled, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditEnabled, setAuditEnabled, 
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    if (ValkeyModule_RegisterBoolConfig(ctx, "always_audit_config", 1, 
+    if (ValkeyModule_RegisterBoolConfig(ctx, "always_audit_config", config.always_audit_config, 
             VALKEYMODULE_CONFIG_DEFAULT,
             getAuditAlwaysAuditConfig, setAuditAlwaysAuditConfig,
             NULL, NULL) == VALKEYMODULE_ERR) {
