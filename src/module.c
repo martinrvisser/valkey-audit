@@ -1950,7 +1950,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         // Register the AUDITUSERS command separately (keeping it as a top-level command)
     if (ValkeyModule_CreateCommand(ctx, "auditusers", 
             AuditUsersCommand,
-            "admin no-cluster", 0, 0, 0) == VALKEYMODULE_ERR) {
+            "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
