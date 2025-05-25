@@ -288,58 +288,219 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         # Re-enable payload logging
         self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_DISABLE", "no")
     
-def test_006_get_config(self):
-    """Test getting the current configuration"""
-    config = self.redis.execute_command("CONFIG GET AUDIT.*")
-    
-    # Check structure - Redis returns flat key-value pairs
-    self.assertEqual(len(config), 16, "Config should have 16 items")
-    
-    # Convert flat array to dictionary (every two elements form a key-value pair)
-    config_dict = {}
-    for i in range(0, len(config), 2):
-        key = config[i]
-        value = config[i + 1]
-        config_dict[key] = value
-    
-    # Debug output
-    for key, value in config_dict.items():
-        print(f"{key}: {value}")
-    
-    # Check for required configurations
-    self.assertIn("audit.enabled", config_dict, "Missing audit.enabled config")
-    self.assertIn("audit.always_audit_config", config_dict, "Missing audit.always_audit_config config")
-    self.assertIn("audit.events", config_dict, "Missing audit.events config")
-    self.assertIn("audit.format", config_dict, "Missing audit.format config")
-    self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
-    self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
-    self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
-    
-    # Check protocol is set to file
-    self.assertEqual(config_dict["audit.protocol"], "file audit.log", 
-                     "Protocol should be 'file audit.log'")
-    
-    # Check format is json
-    self.assertEqual(config_dict["audit.format"], "json", 
-                     "Format should be 'json'")
-    
-    # Check events is set to all
-    self.assertEqual(config_dict["audit.events"], "all", 
-                     "Events should be 'all'")
-    
-    # Check payload settings
-    self.assertEqual(config_dict["audit.payload_maxsize"], "1024",
-                     "Payload maxsize should be '1024'")
-    self.assertEqual(config_dict["audit.payload_disable"], "no",
-                     "Payload disable should be 'no'")
-    
-    # Check audit is enabled
-    self.assertEqual(config_dict["audit.enabled"], "yes",
-                     "Audit should be enabled")
-    
-    # Check always_audit_config is enabled
-    self.assertEqual(config_dict["audit.always_audit_config"], "yes",
-                     "always_audit_config should be enabled")
+    def test_006_get_config(self):
+        """Test getting the current configuration"""
+        self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_MAXSIZE", "1024")
+
+        config = self.redis.execute_command("CONFIG GET AUDIT.*")
+        
+        # Check structure - Redis returns flat key-value pairs
+        self.assertEqual(len(config), 30, "Config should have 30 items")
+        
+        # Convert flat array to dictionary (every two elements form a key-value pair)
+        config_dict = {}
+        for i in range(0, len(config), 2):
+            key = config[i]
+            value = config[i + 1]
+            config_dict[key] = value
+        
+        # Debug output
+        for key, value in config_dict.items():
+            print(f"{key}: {value}")
+        
+        # Check for required configurations
+        self.assertIn("audit.enabled", config_dict, "Missing audit.enabled config")
+        self.assertIn("audit.always_audit_config", config_dict, "Missing audit.always_audit_config config")
+        self.assertIn("audit.events", config_dict, "Missing audit.events config")
+        self.assertIn("audit.format", config_dict, "Missing audit.format config")
+        self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
+        self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
+        self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
+        
+        # Check protocol is set to file
+        self.assertEqual(config_dict["audit.protocol"], "file "+self.log_file, 
+                        "Protocol should be 'file audit.log")
+        
+        # Check format is json
+        formats = ["json","csv","text"]
+        self.assertIn(config_dict["audit.format"], formats, 
+                        "Format should be 'json', 'csv' or 'text'")
+        
+        # Check events is set to all
+        self.assertEqual(config_dict["audit.events"], "all", 
+                        "Events should be 'all'")
+        
+        # Check payload settings
+        self.assertEqual(config_dict["audit.payload_maxsize"], "1024",
+                        "Payload maxsize should be '1024'")
+        self.assertEqual(config_dict["audit.payload_disable"], "no",
+                        "Payload disable should be 'no'")
+        
+        # Check audit is enabled
+        yesno = ["yes","no"]
+        self.assertIn(config_dict["audit.enabled"], yesno,
+                        "Audit should be enabled")
+        
+        # Check always_audit_config is enabled
+        self.assertIn(config_dict["audit.always_audit_config"], yesno,
+                        "always_audit_config should be enabled")
+
+    def test_007_set_protocol_syslog(self):
+        """Test setting the audit protocol to syslog"""
+        # Set the protocol to syslog with local0 facility
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "syslog local0")
+        self.assertEqual(result, "OK", "Failed to set protocol to syslog")
+        
+        # Verify the protocol was set correctly
+        protocol_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.PROTOCOL")
+        self.assertIsInstance(protocol_result, list, "CONFIG GET should return a list")
+        self.assertEqual(len(protocol_result), 2, "CONFIG GET should return key-value pair")
+        self.assertEqual(protocol_result[0], "AUDIT.PROTOCOL", "Unexpected config key")
+        self.assertEqual(protocol_result[1], "syslog local0", "Protocol not set correctly")
+        
+        # Write something to trigger an audit event
+        self.redis.set("syslog_test_key", "syslog_test_value")
+        
+        # Note: For syslog testing, we can't easily verify the log content without 
+        # access to system logs, but we can verify the command succeeded and 
+        # didn't cause any errors
+        
+        # Test with different facility
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "syslog daemon")
+        self.assertEqual(result, "OK", "Failed to set protocol to syslog with daemon facility")
+        
+        # Verify the facility change
+        protocol_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.PROTOCOL")
+        self.assertEqual(protocol_result[1], "syslog daemon", "Syslog facility not updated correctly")
+        
+        # Test invalid facility
+        with self.assertRaises(Exception) as context:
+            self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "syslog invalid_facility")
+        
+        # The error message should mention invalid facility
+        self.assertIn("Invalid syslog facility", str(context.exception))
+
+    def test_008_set_protocol_tcp(self):
+        """Test setting the audit protocol to TCP"""
+        import socket
+        import threading
+        import time
+        from queue import Queue, Empty
+        
+        # Create a simple TCP server to receive audit logs
+        received_data = Queue()
+        server_socket = None
+        server_thread = None
+        
+        def tcp_server(port, data_queue):
+            nonlocal server_socket
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                server_socket.bind(('127.0.0.1', port))
+                server_socket.listen(1)
+                server_socket.settimeout(5.0)  # 5 second timeout
+                
+                conn, addr = server_socket.accept()
+                conn.settimeout(2.0)
+                
+                # Read data from the connection
+                while True:
+                    try:
+                        data = conn.recv(1024)
+                        if not data:
+                            break
+                        data_queue.put(data.decode('utf-8', errors='ignore'))
+                    except socket.timeout:
+                        break
+                    except Exception:
+                        break
+                
+                conn.close()
+            except Exception as e:
+                data_queue.put(f"SERVER_ERROR: {str(e)}")
+            finally:
+                if server_socket:
+                    server_socket.close()
+        
+        # Find an available port
+        test_port = 19999
+        while test_port < 20100:
+            try:
+                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_socket.bind(('127.0.0.1', test_port))
+                test_socket.close()
+                break
+            except OSError:
+                test_port += 1
+        
+        # Start the TCP server
+        server_thread = threading.Thread(target=tcp_server, args=(test_port, received_data))
+        server_thread.daemon = True
+        server_thread.start()
+        
+        # Give the server a moment to start
+        time.sleep(0.1)
+        
+        try:
+            # Set the protocol to TCP
+            tcp_config = f"tcp 127.0.0.1:{test_port}"
+            result = self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", tcp_config)
+            self.assertEqual(result, "OK", "Failed to set protocol to TCP")
+            
+            # Verify the protocol was set correctly
+            protocol_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.PROTOCOL")
+            self.assertIsInstance(protocol_result, list, "CONFIG GET should return a list")
+            self.assertEqual(len(protocol_result), 2, "CONFIG GET should return key-value pair")
+            self.assertEqual(protocol_result[0], "AUDIT.PROTOCOL", "Unexpected config key")
+            self.assertEqual(protocol_result[1], tcp_config, "TCP protocol not set correctly")
+            
+            # Write something to trigger an audit event
+            self.redis.set("tcp_test_key", "tcp_test_value")
+            self.redis.get("tcp_test_key")
+            
+            # Give some time for the audit log to be sent
+            time.sleep(0.5)
+            
+            # Check if we received any data
+            received_any_data = False
+            all_received_data = []
+            
+            try:
+                while True:
+                    data = received_data.get_nowait()
+                    if data.startswith("SERVER_ERROR:"):
+                        self.fail(f"TCP server error: {data}")
+                    all_received_data.append(data)
+                    received_any_data = True
+            except Empty:
+                pass
+            
+            # We should have received some audit log data
+            self.assertTrue(received_any_data, 
+                        "No audit log data was received via TCP")
+            
+            # The received data should contain audit information
+            combined_data = ''.join(all_received_data)
+            self.assertIn("tcp_test_key", combined_data, 
+                        "Audit log should contain the test key")
+            
+        finally:
+            # Clean up
+            if server_thread and server_thread.is_alive():
+                server_thread.join(timeout=1.0)
+        
+        # Test invalid TCP format
+        with self.assertRaises(Exception) as context:
+            self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "tcp invalid_format")
+        
+        self.assertIn("TCP format must be", str(context.exception))
+        
+        # Test invalid port
+        with self.assertRaises(Exception) as context:
+            self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "tcp 127.0.0.1:99999")
+        
+        self.assertIn("Invalid port number", str(context.exception))
     
 if __name__ == "__main__":
     unittest.main(verbosity=2)

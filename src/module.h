@@ -10,6 +10,7 @@
 // Protocol types
 #define PROTOCOL_FILE 0
 #define PROTOCOL_SYSLOG 1
+#define PROTOCOL_TCP 2
 
 // Event categories
 #define EVENT_CONNECTIONS (1<<0)
@@ -22,6 +23,15 @@
 #define FORMAT_JSON 1
 #define FORMAT_CSV 2
 
+// Fsync policies
+#define AOF_FSYNC_NO 0       // Don't fsync, just let the OS handle it (highest performance)
+#define AOF_FSYNC_ALWAYS 1   // Fsync after every write (highest durability)
+#define AOF_FSYNC_EVERYSEC 2  // Fsync once per second (good compromise)
+
+#define AUDIT_LOG_BUFFER_SIZE (1*1024*1024)   // 1MB buffer
+#define AUDIT_LOG_FLUSH_INTERVAL 1000         // Flush every 1000ms
+
+// module config structure
 typedef struct AuditConfig {
     int enabled;
     int protocol;
@@ -30,18 +40,40 @@ typedef struct AuditConfig {
     int disable_payload;
     size_t max_payload_size;
     char *file_path;
+    int file_fd;
     int syslog_facility;
     int syslog_priority;
-    int file_fd;
     int always_audit_config;
-} AuditConfig;
+    int fsync_policy;
 
-typedef struct ConnectionStats {
-    size_t total_connections;
-    size_t active_connections;
-    size_t auth_failures;
-    time_t start_time;
-} ConnectionStats;
+    /* TCP-specific settings */
+    char *tcp_host;
+    int tcp_port;
+    int tcp_timeout_ms;
+    int tcp_retry_interval_ms;
+    int tcp_max_retries;
+    int tcp_reconnect_on_failure;
+    int tcp_buffer_on_disconnect;
+
+     /* Internal fields */
+     pthread_mutex_t log_mutex;     /* Mutex for thread safety */
+     int tcp_socket;                /* Current TCP socket, -1 if not connected */
+     int tcp_connected;             /* TCP connection state */
+     time_t tcp_last_connect;       /* Last connection attempt time */
+     int tcp_retry_count;           /* Current retry count */
+     
+     /* Circular buffer */
+     char *buffer;                  /* Circular buffer for logs */
+     size_t buffer_size;            /* Size of the buffer */
+     size_t buffer_head;            /* Write position */
+     size_t buffer_tail;            /* Read position */
+     size_t buffer_used;            /* Number of bytes in buffer */
+     pthread_t worker_thread;       /* Background worker thread */
+     pthread_mutex_t buffer_mutex;  /* Buffer mutex */
+     pthread_cond_t buffer_cond;    /* Buffer condition variable */
+     int worker_running;            /* Worker thread state */
+     int shutdown_flag;             /* Signal to shutdown */
+} AuditConfig;
 
 // Define a hash table structure for client ID to username mapping
 typedef struct ClientUsernameEntry {
