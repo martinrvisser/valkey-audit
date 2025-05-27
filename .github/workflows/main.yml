@@ -18,7 +18,11 @@ jobs:
           if [ -d "pdfs" ]; then
             if ls -A pdfs/* 1> /dev/null 2>&1; then
               echo "Removing existing PDF files..."
-              rm -f pdfs/*.pdf # Remove all .pdf files from the pdfs directory
+              for file in `ls pdfs/docs/*.pdf`
+              do
+                echo "Removing $file"
+                rm $file
+              done
             else
               echo "pdfs directory exists but is empty."
             fi
