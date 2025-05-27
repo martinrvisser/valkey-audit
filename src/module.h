@@ -5,7 +5,7 @@
 #define MAX_LOG_SIZE 10000
 #define MAX_BUFFER_SIZE 1024
 #define USERNAME_HASH_SIZE 1024
-#define COMMAND_TABLE_SIZE 64
+#define COMMAND_TABLE_SIZE 150
 
 // Protocol types
 #define PROTOCOL_FILE 0
@@ -17,6 +17,7 @@
 #define EVENT_AUTH (1<<1)
 #define EVENT_CONFIG (1<<2)
 #define EVENT_KEYS (1<<3)
+#define EVENT_OTHER (1<<4)
 
 // Event format types
 #define FORMAT_TEXT 0

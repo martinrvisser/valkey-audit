@@ -27,7 +27,7 @@ static AuditConfig config = {
     .enabled = 1,
     .protocol = PROTOCOL_FILE,
     .format = FORMAT_TEXT,
-    .event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS,
+    .event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER,
     .disable_payload = 0,
     .max_payload_size = 1024,
     .file_path = "audit.log",
@@ -100,6 +100,13 @@ static CommandDefinition keyCommands[] = {
     {"msetnx", 1, -1, 2, 0},
     {"append", 1, 1, 1, 0},
     {"strlen", 1, 1, 1, 0},
+    {"incr", 1, 1, 1, 0},
+    {"incrby", 1, 1, 1, 0},
+    {"incrbyfloat", 1, 1, 1, 0},
+    {"decr", 1, 1, 1, 0},
+    {"decrby", 1, 1, 1, 0},
+    {"setrange", 1, 1, 1, 0},
+    {"getrange", 1, 1, 1, 0},
     /* Hash commands */
     {"hset", 1, 1, 1, 0},
     {"hsetnx", 1, 1, 1, 0},
@@ -109,6 +116,13 @@ static CommandDefinition keyCommands[] = {
     {"hgetall", 1, 1, 1, 0},
     {"hdel", 1, 1, 1, 0},
     {"hlen", 1, 1, 1, 0},
+    {"hexists", 1, 1, 1, 0},
+    {"hkeys", 1, 1, 1, 0},
+    {"hvals", 1, 1, 1, 0},
+    {"hincrby", 1, 1, 1, 0},
+    {"hincrbyfloat", 1, 1, 1, 0},
+    {"hscan", 1, 1, 1, 0},
+    {"hstrlen", 1, 1, 1, 0},
     /* List commands */
     {"lpush", 1, 1, 1, 0},
     {"rpush", 1, 1, 1, 0},
@@ -118,17 +132,50 @@ static CommandDefinition keyCommands[] = {
     {"lindex", 1, 1, 1, 0},
     {"lrange", 1, 1, 1, 0},
     {"ltrim", 1, 1, 1, 0},
+    {"lset", 1, 1, 1, 0},
+    {"linsert", 1, 1, 1, 0},
+    {"lrem", 1, 1, 1, 0},
+    {"lpushx", 1, 1, 1, 0},
+    {"rpushx", 1, 1, 1, 0},
+    {"blpop", 1, -1, 1, 0},
+    {"brpop", 1, -1, 1, 0},
+    {"brpoplpush", 1, 2, 1, 0},
+    {"rpoplpush", 1, 2, 1, 0},
     /* Set commands */
     {"sadd", 1, 1, 1, 0},
     {"srem", 1, 1, 1, 0},
     {"smembers", 1, 1, 1, 0},
     {"sismember", 1, 1, 1, 0},
     {"scard", 1, 1, 1, 0},
-    /* ZSet commands */
+    {"spop", 1, 1, 1, 0},
+    {"srandmember", 1, 1, 1, 0},
+    {"smove", 1, 2, 1, 0},
+    {"sscan", 1, 1, 1, 0},
+    {"smismember", 1, 1, 1, 0},
+    /* Sorted Set commands */
     {"zadd", 1, 1, 1, 0},
     {"zrem", 1, 1, 1, 0},
     {"zrange", 1, 1, 1, 0},
     {"zcard", 1, 1, 1, 0},
+    {"zrevrange", 1, 1, 1, 0},
+    {"zrangebyscore", 1, 1, 1, 0},
+    {"zrevrangebyscore", 1, 1, 1, 0},
+    {"zcount", 1, 1, 1, 0},
+    {"zrank", 1, 1, 1, 0},
+    {"zrevrank", 1, 1, 1, 0},
+    {"zscore", 1, 1, 1, 0},
+    {"zincrby", 1, 1, 1, 0},
+    {"zremrangebyrank", 1, 1, 1, 0},
+    {"zremrangebyscore", 1, 1, 1, 0},
+    {"zremrangebylex", 1, 1, 1, 0},
+    {"zrangebylex", 1, 1, 1, 0},
+    {"zrevrangebylex", 1, 1, 1, 0},
+    {"zlexcount", 1, 1, 1, 0},
+    {"zscan", 1, 1, 1, 0},
+    {"zpopmin", 1, 1, 1, 0},
+    {"zpopmax", 1, 1, 1, 0},
+    {"bzpopmin", 1, -1, 1, 0},
+    {"bzpopmax", 1, -1, 1, 0},
     /* Key space commands */
     {"del", 1, -1, 1, 0},
     {"exists", 1, -1, 1, 0},
@@ -141,6 +188,16 @@ static CommandDefinition keyCommands[] = {
     {"type", 1, 1, 1, 0},
     {"rename", 1, 2, 1, 0},
     {"renamenx", 1, 2, 1, 0},
+    {"persist", 1, 1, 1, 0},
+    {"dump", 1, 1, 1, 0},
+    {"restore", 1, 1, 1, 0},
+    {"touch", 1, -1, 1, 0},
+    {"unlink", 1, -1, 1, 0},
+    {"copy", 1, 2, 1, 0},
+    {"move", 1, 1, 1, 0},
+    {"object", 1, 1, 1, 0},
+    {"expiretime", 1, 1, 1, 0},
+    {"pexpiretime", 1, 1, 1, 0},
     /* Multi-key operations */
     {"sunion", 1, -1, 1, 0},
     {"sinter", 1, -1, 1, 0},
@@ -148,6 +205,43 @@ static CommandDefinition keyCommands[] = {
     {"sunionstore", 1, -1, 1, 0},
     {"sinterstore", 1, -1, 1, 0},
     {"sdiffstore", 1, -1, 1, 0},
+    /* Sorted set multi-key operations */
+    {"zunionstore", 1, -1, 1, 0},
+    {"zinterstore", 1, -1, 1, 0},
+    /* Bit operations */
+    {"setbit", 1, 1, 1, 0},
+    {"getbit", 1, 1, 1, 0},
+    {"bitcount", 1, 1, 1, 0},
+    {"bitpos", 1, 1, 1, 0},
+    {"bitfield", 1, 1, 1, 0},
+    /* HyperLogLog commands */
+    {"pfadd", 1, 1, 1, 0},
+    {"pfcount", 1, -1, 1, 0},
+    {"pfmerge", 1, -1, 1, 0},
+    /* Geo commands */
+    {"geoadd", 1, 1, 1, 0},
+    {"geodist", 1, 1, 1, 0},
+    {"geohash", 1, 1, 1, 0},
+    {"geopos", 1, 1, 1, 0},
+    {"georadius", 1, 1, 1, 0},
+    {"georadiusbymember", 1, 1, 1, 0},
+    {"geosearch", 1, 1, 1, 0},
+    {"geosearchstore", 1, 2, 1, 0},
+    /* Stream commands */
+    {"xadd", 1, 1, 1, 0},
+    {"xrange", 1, 1, 1, 0},
+    {"xrevrange", 1, 1, 1, 0},
+    {"xlen", 1, 1, 1, 0},
+    {"xread", 1, -1, 1, 0},
+    {"xreadgroup", 1, -1, 1, 0},
+    {"xgroup", 1, 1, 1, 0},
+    {"xack", 1, 1, 1, 0},
+    {"xclaim", 1, 1, 1, 0},
+    {"xautoclaim", 1, 1, 1, 0},
+    {"xpending", 1, 1, 1, 0},
+    {"xinfo", 1, 1, 1, 0},
+    {"xdel", 1, 1, 1, 0},
+    {"xtrim", 1, 1, 1, 0},
     /* End marker */
     {NULL, 0, 0, 0, 0}
 };
@@ -1631,7 +1725,7 @@ ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
         strcpy(event_str, "none");
     } else {
         // Check for all events (more maintainable)
-        const int all_events = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
+        const int all_events = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
         if (config.event_mask == all_events) {
             strcpy(event_str, "all");
         } else {
@@ -1647,6 +1741,9 @@ ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
         
             if (config.event_mask & EVENT_KEYS) 
                 pos += snprintf(event_str + pos, sizeof(event_str) - pos, "keys,");
+
+            if (config.event_mask & EVENT_OTHER) 
+                pos += snprintf(event_str + pos, sizeof(event_str) - pos, "other,");
 
             // Remove trailing comma
             if (pos > 0) {
@@ -1675,7 +1772,7 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     
     // Process special keywords "all" or "none"
     if (strcasecmp(events_copy, "all") == 0) {
-        config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
+        config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
         logAuditEvent("AUDIT", "SET_EVENTS", "events=all", "n/a", "n/a");
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
@@ -1710,6 +1807,9 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
         } else if (strcasecmp(token, "keys") == 0) {
             new_mask |= EVENT_KEYS;
             snprintf(event_str, sizeof(event_str), "keys,");
+        } else if (strcasecmp(token, "other") == 0) {
+            new_mask |= EVENT_OTHER;
+            snprintf(event_str, sizeof(event_str), "other,");    
         } else {
             ValkeyModule_Free(events_copy);
             char error_msg[100];
@@ -2305,6 +2405,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     int category_match = 0;
     int is_key_cmd = 0;
     int is_auth_cmd = 0;
+    int is_other_cmd =0;
     
     // Check if it's a CONFIG command
     if (is_config_cmd) {
@@ -2330,6 +2431,11 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
                 is_key_cmd = 1;
                 category_match = 1;
             }
+        }
+        // If not a key command but OTHER auditing is enabled
+        if (!is_key_cmd && (config.event_mask & EVENT_OTHER)) {
+            category_match = 1;
+            is_other_cmd =1;
         }
     }
     
@@ -2477,6 +2583,40 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
             }
         }
     }
+    // For OTHER commands, add basic argument information
+    else if (is_other_cmd) {
+        // Add first few arguments for context
+        int argc = ValkeyModule_CommandFilterArgsCount(filter);
+        int max_args_to_log = 3; 
+        
+        for (int i = 1; i < argc && i <= max_args_to_log; i++) {
+            const ValkeyModuleString *arg = ValkeyModule_CommandFilterArgGet(filter, i);
+            if (arg != NULL) {
+                size_t arg_len;
+                const char *arg_str = ValkeyModule_StringPtrLen(arg, &arg_len);
+                
+                size_t details_len = strlen(details);
+                if (details_len > 0) {
+                    snprintf(details + details_len, sizeof(details) - details_len, " ");
+                    details_len += 1;
+                }
+                
+                // Limit argument length to prevent log overflow
+                size_t max_arg_len = 50;
+                if (arg_len > max_arg_len) {
+                    snprintf(details + details_len, sizeof(details) - details_len, "arg%d=%.50s...", i, arg_str);
+                } else {
+                    snprintf(details + details_len, sizeof(details) - details_len, "arg%d=%.*s", i, (int)arg_len, arg_str);
+                }
+            }
+        }
+        
+        // Indicate if there are more arguments
+        if (argc > max_args_to_log + 1) {
+            size_t details_len = strlen(details);
+            snprintf(details + details_len, sizeof(details) - details_len, " (and %d more args)", argc - max_args_to_log - 1);
+        }
+    }
     
     // Determine category string for the log
     const char *category_str;
@@ -2486,7 +2626,9 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         category_str = "AUTH";
     } else if (is_key_cmd) {
         category_str = "KEY_OP";
-    } else {
+    } else if (is_other_cmd) {
+        category_str = "OTHER";
+    } else { // Should not happen
         category_str = "COMMAND";
     }
     
@@ -2665,8 +2807,10 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                     config.event_mask |= EVENT_CONFIG;
                 } else if (strcasecmp(token, "keys") == 0) {
                     config.event_mask |= EVENT_KEYS;
+                } else if (strcasecmp(token, "other") == 0) {
+                    config.event_mask |= EVENT_OTHER;
                 } else if (strcasecmp(token, "all") == 0) {
-                    config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS;
+                    config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
                 } else if (strcasecmp(token, "none") == 0) {
                     config.event_mask = 0;
                 } else {
@@ -2869,6 +3013,9 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     }
     if (config.event_mask & EVENT_KEYS) {
         pos += snprintf(default_events + pos, sizeof(default_events) - pos, "keys,");
+    }
+    if (config.event_mask & EVENT_OTHER) {
+        pos += snprintf(default_events + pos, sizeof(default_events) - pos, "other,");
     }
     
     // Remove trailing comma if any events were added

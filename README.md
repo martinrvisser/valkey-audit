@@ -1,13 +1,13 @@
 # Valkey Audit Module
 
-This module provides comprehensive auditing capabilities for Valkey servers. It allows logging of various event types to different output protocols with configurable formatting.
+This module provides comprehensive auditing capabilities for Valkey servers. It allows logging of various event types to different output protocols and destinations with configurable formatting.
 
 ## Features
 
-- **Multiple logging protocols**: File system and Syslog support
-- **Configurable formats**: Text, JSON, and CSV output formats
-- **Selective event auditing**: Configure which events to audit
-- **Command payload options**: Control whether and how much of command payloads to include
+- **Multiple logging protocols**: file system, syslog support and TCP support
+- **Configurable formats**: text, JSON, and CSV output formats
+- **Selective event auditing**: configure which events to audit
+- **Command payload options**: control whether and how much of a command payloads to include in the audit message
 
 ## Build Instructions
 
@@ -35,14 +35,23 @@ The module uses the standard Valkey configuration facility which means that para
 Available parameters:
 - `audit.enable [yes|no]`: Enable or disable auditing.
 - `audit.always_audit_config [yes|no]`: Enable or disable the auditing of config commands regardless of per user events setting. This allows the logging of config commands for a user even if the user is in the exclusion list.
-- `audit.protocol [file|syslog]`: Logging protocol to use. 
+- `audit.protocol [file|syslog|tcp]`: Logging protocol to use. 
     When using the file protocol it should be followed by the filepath.
     When using the syslog protocol it should be followed by the syslog facility.
+    When using the syslog protocol it should be followed by the double quoted host:port string.
 - `audit.format [text|json|csv]`: Log format.
-- `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys).
+- `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys,other,none,all).
 - `audit.payload_disable`: Disable logging command payloads.
 - `audit.payload_maxsize [size]`: Maximum payload size to log in bytes.
 - `audit.excluderules`: Specific usernames and/or IP addresses to exclude from auditing.
+- `audit.tcp_host`: Hostname or IP for target TCP destination to write audit messages.
+- `audit.tcp_port`: port destination to write audit messages.
+- `audit.tcp_timeout_ms`: timeout in ms for establishing TCP connection.
+- `audit.tcp_retry_interval_ms`:  retry interval for establishing TCP connections.
+- `audit.tcp_max_retries`: maximum number of retries to establish a TCP connection.
+- `audit.tcp_buffer_on_disconnect`: buffer messages during disconnected state from target TCP destination.
+- `audit.tcp_reconnect_on_failure`: automatic reconnect to TCP destination on failure.
+
 
 ## Example Usage
 
@@ -54,7 +63,7 @@ CONFIG SET AUDIT.ENABLE yes
 CONFIG SET AUDIT.ENABLE no
 ```
 
-To enable/disable always auditing of config commands:
+To enable/disable always auditing of config commands. This will log config commands irrespective of what events are set to be audited:
 
 ```
 CONFIG SET AUDIT.ALWAYS_AUDIT_CONFIG yes
@@ -68,6 +77,7 @@ To set the audit logging protocol, use one of:
 ```
 CONFIG SET AUDIT.PROTOCOL file /path/to/logfile
 CONFIG SET AUDIT.PROTOCOL syslog local0
+CONFIG SET AUDIT.PROTOCOL tcp "127.0.0.1:9514"
 ```
 
 ### format
@@ -95,6 +105,7 @@ Available event categories:
 - `auth`: Authentication attempts (with password redaction)
 - `config`: Configuration commands
 - `keys`: Key operations
+- `other`: Operations that are not config and are not key operations
 
 ### payload
 
@@ -138,6 +149,22 @@ To remove the current list of exclusion rules
 
 ```
 CONFIG SET AUDIT.EXCLUDERULES ""
+```
+### TCP destination
+
+Setting the TCP connection parameters:
+```
+CONFIG SET audit.tcp_host 127.0.0.1
+CONFIG SET audit.tcp_port 9514
+CONFIG SET audit.tcp_timeout_ms 1000
+CONFIG SET audit.tcp_retry_interval_ms 3000
+CONFIG SET audit.tcp_max_retries 3
+```
+
+Behaviour for disconnects:
+```
+CONFIG SET audit.tcp_buffer_on_disconnect yes
+CONFIG SET audit.tcp_reconnect_on_failure yes
 ```
 
 ## Manual Module Testing

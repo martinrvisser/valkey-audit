@@ -196,34 +196,64 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         # Generate different types of events
         self.redis.set("key1", "value1")  # Key operation - should NOT be logged
         self.redis.execute_command("CONFIG", "GET", "port")  # Config operation - should be logged
+        self.redis.execute_command("INFO", "server")  # Other operation - should NOT be logged
         
         # Check log file
         log_lines = self._read_log_file()
         
         # Only CONFIG events should be logged
         self.assertTrue(any("CONFIG" in line for line in log_lines), 
-                       "CONFIG event was not logged")
+                    "CONFIG event was not logged")
         self.assertFalse(any("KEY_OP" in line for line in log_lines), 
                         "KEY_OP event was logged but should not be")
+        self.assertFalse(any("OTHER" in line for line in log_lines), 
+                        "OTHER event was logged but should not be")
         
-        # Test setting multiple events
-        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config, keys")
+        # Test setting multiple events including other
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config,keys,other")
         
         # Clear log file
         self._clear_log_file()
         
         # Generate events again
-        self.redis.set("key2", "value2")
-        self.redis.execute_command("CONFIG", "GET", "port")
+        self.redis.set("key2", "value2")  # Key operation
+        self.redis.execute_command("CONFIG", "GET", "port")  # Config operation
+        self.redis.execute_command("INFO", "server")  # Other operation
+        self.redis.execute_command("FLUSHDB")  # Other operation (administrative)
         
         # Check log file
         log_lines = self._read_log_file()
         
-        # Both CONFIG and KEY_OP events should be logged
+        # All three event types should be logged
         self.assertTrue(any("CONFIG" in line for line in log_lines), 
-                       "CONFIG event was not logged")
+                    "CONFIG event was not logged")
         self.assertTrue(any("KEY_OP" in line for line in log_lines), 
-                       "KEY_OP event was not logged")
+                    "KEY_OP event was not logged")
+        self.assertTrue(any("OTHER" in line for line in log_lines), 
+                    "OTHER event was not logged")
+        
+        # Test setting only other events
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "other")
+        
+        # Clear log file
+        self._clear_log_file()
+        
+        # Generate different types of events
+        self.redis.set("key3", "value3")  # Key operation - should NOT be logged
+        self.redis.execute_command("CONFIG", "GET", "port")  # Config operation - should NOT be logged  
+        self.redis.execute_command("INFO", "memory")  # Other operation - should be logged
+        self.redis.execute_command("CLIENT", "LIST")  # Other operation - should be logged
+        
+        # Check log file
+        log_lines = self._read_log_file()
+        
+        # Only OTHER events should be logged
+        self.assertTrue(any("OTHER" in line for line in log_lines), 
+                    "OTHER event was not logged")
+        self.assertFalse(any("KEY_OP" in line for line in log_lines), 
+                        "KEY_OP event was logged but should not be")
+        self.assertFalse(any("CONFIG" in line for line in log_lines), 
+                        "CONFIG event was logged but should not be")
         
         # Test disabling all events
         self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "none")
@@ -232,8 +262,9 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self._clear_log_file()
         
         # Generate events
-        self.redis.set("key3", "value3")
+        self.redis.set("key4", "value4")
         self.redis.execute_command("CONFIG", "GET", "port")
+        self.redis.execute_command("INFO", "server")
         
         # Check log file - should be empty
         log_lines = self._read_log_file()

@@ -72,7 +72,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             f.write(f"loadmodule {cls.module_path}\n")    
             f.write(f"audit.protocol file {cls.log_file}\n")
         
-        print(f"written {cls.temp_dir} valkey.conf")
+        print(f"written {cls.temp_dir}/valkey.conf")
 
         # Start the server
         cls.server_proc = subprocess.Popen(
