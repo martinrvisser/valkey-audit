@@ -2,6 +2,10 @@
 #ifndef MODULE_H
 #define MODULE_H
 
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX 256
+#endif
+
 #define MAX_LOG_SIZE 10000
 #define MAX_BUFFER_SIZE 1024
 #define USERNAME_HASH_SIZE 1024
@@ -82,6 +86,7 @@ typedef struct ClientUsernameEntry {
     char *username;
     char *ip_address;
     int no_audit; // indicator if the user's commands should not be logged
+    int client_port;
     struct ClientUsernameEntry *next;
 } ClientUsernameEntry;
 
