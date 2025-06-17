@@ -24,6 +24,7 @@
 #include <poll.h>
 
 static char server_hostname[HOST_NAME_MAX];
+static int loglevel_debug = 0;
 
 static AuditConfig config = {
     .enabled = 1,
@@ -1003,7 +1004,10 @@ void addExclusionRule(const char *username, const char *ip_address) {
         snprintf(log_message, sizeof(log_message), 
                 "Added exclusion rule: ip=%s (any username)", ip_address);
     }
-    logAuditEvent("AUDIT", "ADD_EXCLUSION_RULE", log_message, "n/a", "n/a", 0);
+
+    if (loglevel_debug) {
+        printf("%s\n", log_message);
+    }
 }
 
 int isClientExcluded(const char *username, const char *ip_address) {
@@ -1131,8 +1135,10 @@ void updateExclusionRules(const char *csv_list) {
                         char log_message[256];
                         snprintf(log_message, sizeof(log_message), 
                                 "Invalid IP address in exclusion rule: %s", ip_address);
-                        logAuditEvent("AUDIT", "INVALID_IP_ADDRESS", log_message, "n/a", "n/a", 0);
-                        
+                        if (loglevel_debug) {
+                            printf("%s\n", log_message);
+                        }
+        
                         // Skip this rule
                         token = strtok(NULL, ",");
                         continue;
@@ -1487,7 +1493,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
     
     // Process based on protocol type
     if (len >= 5 && strncasecmp(input, "file ", 5) == 0) {
-        ValkeyModule_Log(NULL, "notice", "Matched file protocol");
+        ValkeyModule_Log(NULL, "notice", "Audit: Matched file protocol");
         const char *filepath = input + 5;
         
         // Close existing connections
@@ -1533,7 +1539,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         return VALKEYMODULE_OK;
     } 
     else if (len >= 7 && strncasecmp(input, "syslog ", 7) == 0) {
-        ValkeyModule_Log(NULL, "notice", "Matched syslog protocol");
+        ValkeyModule_Log(NULL, "notice", "Audit: Matched syslog protocol");
         const char *facility_str = input + 7;
         int facility = LOG_LOCAL0;  // Default
         
@@ -1586,7 +1592,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         return VALKEYMODULE_OK;
     }
     else if (len >= 4 && strncasecmp(input, "tcp ", 4) == 0) {
-        ValkeyModule_Log(NULL, "notice", "Matched TCP protocol");
+        ValkeyModule_Log(NULL, "notice", "Audit: Matched TCP protocol");
         const char *host_port = input + 4;
         size_t host_port_len = len - 4;
         
@@ -1628,7 +1634,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
             return VALKEYMODULE_ERR;
         }
         
-        ValkeyModule_Log(NULL, "notice", "TCP parsed: host='%s', port=%d", host, port);
+        ValkeyModule_Log(NULL, "notice", "Audit: TCP parsed: host='%s', port=%d", host, port);
         
         // Close existing connections
         if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
@@ -1657,11 +1663,11 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         config.tcp_port = port;
         config.tcp_socket = -1; // Will be connected on first use
         
-        ValkeyModule_Log(NULL, "notice", "TCP protocol configured successfully");
+        ValkeyModule_Log(NULL, "notice", "Audit: TCP protocol configured successfully");
         return VALKEYMODULE_OK;
     }  
     else {
-        ValkeyModule_Log(NULL, "notice", "No protocol matched, input was: '%.*s'", (int)len, input);
+        ValkeyModule_Log(NULL, "notice", "Audit: No protocol matched, input was: '%.*s'", (int)len, input);
         *err = ValkeyModule_CreateString(NULL, "ERR Unknown protocol. Use 'file <path>', 'syslog <facility>', or 'tcp <host:port>'", 84);
         return VALKEYMODULE_ERR;
     }
@@ -1699,15 +1705,21 @@ int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata
     
     if (strcasecmp(format, "text") == 0) {
         config.format = FORMAT_TEXT;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=text", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: format set to TEXT\n");
+        }
         return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "json") == 0) {
         config.format = FORMAT_JSON;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=json", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: format set to JSON\n");
+        }
         return VALKEYMODULE_OK;
     } else if (strcasecmp(format, "csv") == 0) {
         config.format = FORMAT_CSV;
-        logAuditEvent("AUDIT", "SET_FORMAT", "format=csv", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: format set to CSV\n");
+        }
         return VALKEYMODULE_OK;
     } else {
         // Create error message
@@ -1775,12 +1787,16 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     // Process special keywords "all" or "none"
     if (strcasecmp(events_copy, "all") == 0) {
         config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
-        logAuditEvent("AUDIT", "SET_EVENTS", "events=all", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: events set to all\n");
+        }
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
     } else if (strcasecmp(events_copy, "none") == 0) {
         config.event_mask = 0;
-        logAuditEvent("AUDIT", "SET_EVENTS", "events=none", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: events set to none\n");
+        }
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
     }
@@ -1833,7 +1849,9 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     
     char details[512];
     snprintf(details, sizeof(details), "events=%s", event_str);
-    logAuditEvent("AUDIT", "SET_EVENTS", details, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: %s\n", details);
+    }
     
     ValkeyModule_Free(events_copy);
     return VALKEYMODULE_OK;
@@ -1854,7 +1872,9 @@ int setAuditPayloadDisable(const char *name, int new_val, void *privdata, Valkey
     
     char details[32];
     snprintf(details, sizeof(details), "disable=%s", new_val ? "yes" : "no");
-    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: payload set %s\n", details);
+    }
     
     return VALKEYMODULE_OK;
 }
@@ -1877,7 +1897,9 @@ int setAuditPayloadMaxSize(const char *name, long long new_val, void *privdata, 
     
     char details[64];
     snprintf(details, sizeof(details), "maxsize=%zu", config.max_payload_size);
-    logAuditEvent("AUDIT", "SET_PAYLOAD_OPTIONS", details, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: payload set %s\n", details);
+    }
     
     return VALKEYMODULE_OK;
 }
@@ -1911,10 +1933,14 @@ int setAuditAlwaysAuditConfig(const char *name, int new_val, void *privdata, Val
     config.always_audit_config = new_val;
 
     if (config.always_audit_config) {
-        logAuditEvent("AUDIT", "SET_ALWAYS_AUDIT_CONFIG", "always_audit_config=yes", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: always_audit_config set to yes\n");
+        }
         return VALKEYMODULE_OK;
     } else {
-        logAuditEvent("AUDIT", "SET_ALWAYS_AUDIT_CONFIG", "always_audit_config=no", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: always_audit_config set to no\n");
+        }
         return VALKEYMODULE_OK;
     }
 
@@ -2006,8 +2032,10 @@ int setAuditExclusionRules(const char *name, ValkeyModuleString *new_val, void *
         snprintf(details, sizeof(details), "excluderules=%s", truncated);
     }
     
-    logAuditEvent("AUDIT", "SET_EXCLUDE_RULES", details, "n/a", "n/a", 0);
-    
+    if (loglevel_debug) {
+        printf("Audit: %s\n", details);
+    }
+
     return VALKEYMODULE_OK;
 }
 
@@ -2045,7 +2073,10 @@ int setAuditTcpHost(const char *name, ValkeyModuleString *new_val, void *privdat
         config.tcp_host = NULL;
     }
     
-    logAuditEvent("AUDIT", "SET_TCP_HOST", host, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: tcp_host set to %s\n", host);
+    }
+
     return VALKEYMODULE_OK;
 }
 
@@ -2069,7 +2100,9 @@ int setAuditTcpPort(const char *name, long long val, void *privdata, ValkeyModul
     config.tcp_port = (int)val;
     char audit_msg[64];
     snprintf(audit_msg, sizeof(audit_msg), "tcp_port=%d", config.tcp_port);
-    logAuditEvent("AUDIT", "SET_TCP_PORT", audit_msg, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: %s\n", audit_msg);
+    }
 
     return VALKEYMODULE_OK;
 }
@@ -2095,7 +2128,9 @@ int setAuditTcpTimeout(const char *name, long long val, void *privdata, ValkeyMo
     
     char audit_msg[64];
     snprintf(audit_msg, sizeof(audit_msg), "tcp_timeout_ms=%d", config.tcp_timeout_ms);
-    logAuditEvent("AUDIT", "SET_TCP_TIMEOUT", audit_msg, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: %s\n", audit_msg);
+    }
 
     return VALKEYMODULE_OK;
 }
@@ -2121,7 +2156,10 @@ int setAuditTcpRetryInterval(const char *name, long long interval, void *privdat
     
     char audit_msg[64];
     snprintf(audit_msg, sizeof(audit_msg), "tcp_retry_interval_ms=%d", config.tcp_retry_interval_ms);
-    logAuditEvent("AUDIT", "SET_TCP_RETRY_INTERVAL", audit_msg, "n/a", "n/a", 0);
+    
+    if (loglevel_debug) {
+        printf("Audit: %s\n", audit_msg);
+    }
     return VALKEYMODULE_OK;
 }
 
@@ -2147,7 +2185,9 @@ int setAuditTcpMaxRetries(const char *name, long long retries, void *privdata, V
     
     char audit_msg[64];
     snprintf(audit_msg, sizeof(audit_msg), "tcp_max_retries=%d", config.tcp_max_retries);
-    logAuditEvent("AUDIT", "SET_TCP_MAX_RETRIES", audit_msg, "n/a", "n/a", 0);
+    if (loglevel_debug) {
+        printf("Audit: %s\n", audit_msg);
+    }
     return VALKEYMODULE_OK;
 }
 
@@ -2167,10 +2207,15 @@ int setAuditTcpReconnectOnFailure(const char *name, int new_val, void *privdata,
     config.tcp_reconnect_on_failure = new_val;
     
     if (config.tcp_reconnect_on_failure) {
-        logAuditEvent("AUDIT", "SET_TCP_RECONNECT_ON_FAILURE", "tcp_reconnect_on_failure=yes", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: tcp_reconnect_on_failure set to yes\n");
+        }
+
         return VALKEYMODULE_OK;
     } else {
-        logAuditEvent("AUDIT", "SET_TCP_RECONNECT_ON_FAILURE", "tcp_reconnect_on_failure=no", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: tcp_reconnect_on_failure set to no\n");
+        }
         return VALKEYMODULE_OK;
     }
 }
@@ -2191,10 +2236,14 @@ int setAuditTcpBufferOnDisconnect(const char *name, int new_val, void *privdata,
     config.tcp_buffer_on_disconnect = new_val;
     
     if (config.tcp_buffer_on_disconnect) {
-        logAuditEvent("AUDIT", "SET_TCP_BUFFER_ON_DISCONNECT", "tcp_buffer_on_disconnect=yes", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: tcp_buffer_on_disconnect set to yes\n");
+        }
         return VALKEYMODULE_OK;
     } else {
-        logAuditEvent("AUDIT", "SET_TCP_BUFFER_ON_DISCONNECT", "tcp_buffer_on_disconnect=no", "n/a", "n/a", 0);
+        if (loglevel_debug) {
+            printf("Audit: tcp_buffer_on_disconnect set to no\n");
+        }
         return VALKEYMODULE_OK;
     }
 }
@@ -2938,6 +2987,25 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     if (gethostname(server_hostname, sizeof(server_hostname)) != 0) {
         ValkeyModule_Log(ctx, "notice", "Audit error getting hostname: %s\n", strerror(errno));
     }
+
+    // Get the server loglevel
+    ValkeyModuleCallReply *reply = ValkeyModule_Call(ctx, "CONFIG", "cc", "GET", "loglevel");
+    if (reply != NULL && ValkeyModule_CallReplyType(reply) == VALKEYMODULE_REPLY_ARRAY) {
+        size_t len = ValkeyModule_CallReplyLength(reply);
+        if (len >= 2) {
+            ValkeyModuleCallReply *value_reply = ValkeyModule_CallReplyArrayElement(reply, 1); // Fixed typo
+            if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_STRING) {
+                size_t str_len;
+                const char *log_level_str = ValkeyModule_CallReplyStringPtr(value_reply, &str_len);
+                if (strncmp(log_level_str, "debug", str_len) == 0) {
+                    loglevel_debug = 1;
+                } else {
+                    loglevel_debug = 0;
+                }
+            }
+        }
+    }
+    ValkeyModule_FreeCallReply(reply);
 
     // Initialize audit logging system
     if (initAuditLog(&config) != 0) {
