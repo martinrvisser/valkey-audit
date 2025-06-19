@@ -28,6 +28,15 @@
 #define FORMAT_JSON 1
 #define FORMAT_CSV 2
 
+// Event flags
+#define EVENT_FAILURE 0
+#define EVENT_SUCCESS 1
+#define EVENT_ATTEMPT 2
+#define EVENT_EXECUTE 3
+#define EVENT_ERROR 4
+#define EVENT_DEBUG 5
+
+
 // Fsync policies
 #define AOF_FSYNC_NO 0       // Don't fsync, just let the OS handle it (highest performance)
 #define AOF_FSYNC_ALWAYS 1   // Fsync after every write (highest durability)
@@ -35,6 +44,7 @@
 
 #define AUDIT_LOG_BUFFER_SIZE (1*1024*1024)   // 1MB buffer
 #define AUDIT_LOG_FLUSH_INTERVAL 1000         // Flush every 1000ms
+#define AUTH_RESULT_CHECK_DELAY_MS 100        // Delay before checking auth result in ACL LOG
 
 // module config structure
 typedef struct AuditConfig {
@@ -87,6 +97,7 @@ typedef struct ClientUsernameEntry {
     char *ip_address;
     int no_audit; // indicator if the user's commands should not be logged
     int client_port;
+    mstime_t auth_timestamp; // Timestamp when auth attempt was made (0 if no auth)
     struct ClientUsernameEntry *next;
 } ClientUsernameEntry;
 
