@@ -326,7 +326,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         config = self.redis.execute_command("CONFIG GET AUDIT.*")
         
         # Check structure - Redis returns flat key-value pairs
-        self.assertEqual(len(config), 30, "Config should have 30 items")
+        self.assertEqual(len(config), 32, "Config should have 32 items")
         
         # Convert flat array to dictionary (every two elements form a key-value pair)
         config_dict = {}
@@ -347,7 +347,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
         self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
         self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
-        
+        self.assertIn("audit.auth_result_check_delay_ms", config_dict, "Missing audit.auth_result_check_delay_ms config")
+
         # Check protocol is set to file
         self.assertEqual(config_dict["audit.protocol"], "file "+self.log_file, 
                         "Protocol should be 'file audit.log")
@@ -532,6 +533,30 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             self.redis.execute_command("CONFIG", "SET", "AUDIT.PROTOCOL", "tcp 127.0.0.1:99999")
         
         self.assertIn("Invalid port number", str(context.exception))
-    
+
+    def test_009_set_auth_delay(self):
+        """Test setting the auth delay"""
+        # Create a new log file path
+        #new_log_file = os.path.join(self.temp_dir.name, "new_audit.log")
+        new_log_file = os.path.join(self.temp_dir, "new_audit.log")
+        
+        # Set the protocol to file with the new path
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.auth_result_check_delay_ms", "100")
+        self.assertEqual(result, "OK", "Failed to set auth result check delay")
+
+        # Write something to trigger an audit event
+        self.redis.set("test_key", "test_value")
+        
+        # Check if the new log file was created
+        self.assertTrue(os.path.exists(new_log_file), 
+                       f"New log file {new_log_file} was not created")
+        
+        # Check if there's content in the new log file
+        with open(new_log_file, 'r') as f:
+            log_content = f.read()
+        
+        self.assertTrue(len(log_content) > 0, 
+                       "No audit log entries were written to the new log file")
+            
 if __name__ == "__main__":
     unittest.main(verbosity=2)

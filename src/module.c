@@ -1891,7 +1891,7 @@ int scheduleAuthResultCheck(ValkeyModuleCtx *ctx, uint64_t client_id) {
     
     // Create the timer
     ValkeyModuleTimerID timer_id = ValkeyModule_CreateTimer(ctx, 
-                                                           AUTH_RESULT_CHECK_DELAY_MS,
+                                                           config.auth_result_check_delay_ms,
                                                            checkAuthResultTimer, 
                                                            client_id_ptr);
     
@@ -2763,6 +2763,31 @@ int setAuditBufferSize(const char *name, ValkeyModuleString *new_val, void *priv
     return VALKEYMODULE_OK;
 }
 
+long long getAuthResultCheckDelay(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    return (long long)config.auth_result_check_delay_ms;
+}
+
+int setAuthResultCheckDelay(const char *name, long long val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    if (val < 1 || val > 1000) {
+        *err = ValkeyModule_CreateString(NULL, "Auth result check delay must be between 1 and 1000 ms", -1);
+        return VALKEYMODULE_ERR;
+    }
+    
+    config.auth_result_check_delay_ms = (int)val;
+    char audit_msg[128];
+    snprintf(audit_msg, sizeof(audit_msg), "auth_result_check_delay_ms=%d", config.auth_result_check_delay_ms);
+    if (loglevel_debug) {
+        printf("Audit: %s\n", audit_msg);
+    }
+
+    return VALKEYMODULE_OK;
+}
 
 /////  Callback functions  /////
 // Client state change callback, used for connection auditing
@@ -2913,6 +2938,8 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
         logAuditEvent("AUTH", "ERROR", "Failed to schedule auth result check", username_str, client_ip, client_port, EVENT_ERROR);
     }
 
+    // delay to get auth result
+    usleep(config.auth_result_check_delay_ms * 1000 + 1); // Convert ms to us
     // We're just logging, not making auth decisions, so pass through
     return VALKEYMODULE_AUTH_NOT_HANDLED;
 }
@@ -3222,7 +3249,8 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
     config.tcp_max_retries = 3;             // Retry 3 times by default
     config.tcp_reconnect_on_failure = 1;    // Enable automatic reconnection
     config.tcp_buffer_on_disconnect = 1;    // Buffer logs during disconnection
-    
+    config.auth_result_check_delay_ms = 10; // 10 milliseconds delay for auth result check
+
     // Process module arguments if any
     for (int i = 0; i < argc; i++) {
         size_t arglen;
@@ -3717,6 +3745,15 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
+    // Register auth result check delay configuration
+    if (ValkeyModule_RegisterNumericConfig(ctx, "auth_result_check_delay_ms", config.auth_result_check_delay_ms,
+            VALKEYMODULE_CONFIG_DEFAULT,
+            1,            // Minimum 1ms
+            1000,         // Maximum 1 seconds (adjust as needed)
+            getAuthResultCheckDelay, setAuthResultCheckDelay, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+    return VALKEYMODULE_ERR;
+}
     // Register buffer size configuration
     //if (ValkeyModule_RegisterNumericConfig(ctx, "buffer_size", config.buffer_size,
     //       VALKEYMODULE_CONFIG_DEFAULT,
