@@ -44,7 +44,6 @@
 
 #define AUDIT_LOG_BUFFER_SIZE (1*1024*1024)   // 1MB buffer
 #define AUDIT_LOG_FLUSH_INTERVAL 1000         // Flush every 1000ms
-#define AUTH_RESULT_CHECK_DELAY_MS 100        // Delay before checking auth result in ACL LOG
 
 // module config structure
 typedef struct AuditConfig {
@@ -60,6 +59,7 @@ typedef struct AuditConfig {
     int syslog_priority;
     int always_audit_config;
     int fsync_policy;
+    int auth_result_check_delay_ms; // Delay for auth result check in milliseconds
 
     /* TCP-specific settings */
     char *tcp_host;
