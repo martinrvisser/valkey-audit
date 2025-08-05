@@ -133,7 +133,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         # Check if there's content in the new log file
         with open(new_log_file, 'r') as f:
             log_content = f.read()
-        
+        #import pdb; pdb.set_trace()
         self.assertTrue(len(log_content) > 0, 
                        "No audit log entries were written to the new log file")
     

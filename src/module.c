@@ -835,7 +835,11 @@ void writeAuditLog(const char *format, ...) {
         switch (config.protocol) {
             case PROTOCOL_FILE:
                 if (config.file_fd != -1) {
-                    write(config.file_fd, message, len);
+                    ssize_t bytes_written = write(config.file_fd, message, len);
+                    if (bytes_written == -1) {
+                        // Only handle complete error - partial writes should result in complete error
+                                ValkeyModule_Log(NULL, "warning", "Audit: Error writing to audit log");
+                    };
                 }
                 break;
                 
@@ -2945,281 +2949,222 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
 }
 
 void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
-    if (config.enabled!=1) return;
+    if (config.enabled != 1) return;
 
-     // Get command name
+    // Get command name - cache the result to avoid repeated calls
     size_t cmd_len; 
     const ValkeyModuleString *cmd_arg = ValkeyModule_CommandFilterArgGet(filter, 0);
-    if (cmd_arg == NULL) return; // No command to audit
+    if (cmd_arg == NULL) return;
     
     const char *cmd_str = ValkeyModule_StringPtrLen(cmd_arg, &cmd_len);
     
-    // Skip auditing for audit module commands to avoid recursion
-    if (strncasecmp(cmd_str, "audit", 5) == 0) {
+    // Fast check for audit module commands to avoid recursion
+    // Use length check first for early exit
+    if (cmd_len >= 5 && strncasecmp(cmd_str, "audit", 5) == 0) {
         return;
     }
     
-    // Early check for CONFIG commands with always_audit_config enabled
-    int is_config_cmd = strcasecmp(cmd_str, "config") == 0;
+    // Pre-compute command type flags using single pass through command
+    int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
+    int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
     
-    // Get client info
+    // Get client info once and cache
     unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
-    int no_audit = 0;
+    ClientUsernameEntry *entry = getClientEntry(client);
+    
+    // Use stack variables with defaults to avoid repeated null checks
     char *username = "unknown";
     char *ip_address = "unknown";
     int client_port = 0;
-    ClientUsernameEntry *entry = getClientEntry(client);
+    int client_no_audit = 0;
     
-    // Always get client info if available, for logging purposes
     if (entry != NULL) {
         username = entry->username;
         ip_address = entry->ip_address;
-        no_audit = entry->no_audit;
+        client_no_audit = entry->no_audit;
         client_port = entry->client_port;
     }
-    
-    // Skip auditing if no_audit is set and it's not a special case:
-    //   it's not a CONFIG command with always_audit_config enabled
-    if (no_audit) {
-        if (!(is_config_cmd && config.always_audit_config))
-        {
-            return;
-        }
+
+    // Early exit for no_audit unless it's a special CONFIG case
+    if (client_no_audit && !(is_config_cmd && config.always_audit_config)) {
+        return;
     }
 
-    // Determine command category : config command determined early for exclusion
+    // Determine command category and early exit if not auditable
     int category_match = 0;
     int is_key_cmd = 0;
-    int is_auth_cmd = 0;
-    int is_other_cmd =0;
+    int is_other_cmd = 0;
+    const char *category_str;
+    AuditModuleCommandInfo *cmd_info = NULL; // Only fetch if needed
     
-    // Check if it's a CONFIG command
     if (is_config_cmd) {
-        // Only audit CONFIG if enabled
         if (config.event_mask & EVENT_CONFIG) {
             category_match = 1;
+            category_str = "CONFIG";
         }
-    }
-    // Check if it's an AUTH command
-    else if (strcasecmp(cmd_str, "auth") == 0) {
-        is_auth_cmd = 1;
-        // Only audit AUTH if enabled
+    } else if (is_auth_cmd) {
         if (config.event_mask & EVENT_AUTH) {
             category_match = 1;
+            category_str = "AUTH";
         }
     } else {
-        // Check if it's a key command by getting command info
-        AuditModuleCommandInfo *cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
-        if (cmd_info != NULL) {
-            // If command affects keys and key auditing is enabled
-            if ((cmd_info->firstkey != 0 || cmd_info->lastkey != 0) && 
+        // Only get command info if we might need it
+        if ((config.event_mask & EVENT_KEYS) || (config.event_mask & EVENT_OTHER)) {
+            cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
+            
+            if (cmd_info != NULL && 
+                (cmd_info->firstkey != 0 || cmd_info->lastkey != 0) && 
                 (config.event_mask & EVENT_KEYS)) {
                 is_key_cmd = 1;
                 category_match = 1;
+                category_str = "KEY_OP";
+            } else if (!is_key_cmd && (config.event_mask & EVENT_OTHER)) {
+                category_match = 1;
+                is_other_cmd = 1;
+                category_str = "OTHER";
             }
-        }
-        // If not a key command but OTHER auditing is enabled
-        if (!is_key_cmd && (config.event_mask & EVENT_OTHER)) {
-            category_match = 1;
-            is_other_cmd =1;
         }
     }
     
-    // Skip if command category doesn't match any enabled audit categories
+    // Early exit if no category matches
     if (!category_match) {
         return;
     }
     
-    // Build command details including args
-    char command_str[256] = "";
-    snprintf(command_str, sizeof(command_str), "%s", cmd_str);
-    command_str[sizeof(command_str) - 1] = '\0';
+    char details[2048];
+    char *details_ptr = details;
+    size_t remaining = sizeof(details) - 1; // Reserve space for null terminator
     
-    // Build details buffer
-    char details[2048] = "";
-    char client_info[128] = "";
-    char username_info[128] = "";
-    char ip_info[128] = "";
+    // Helper macro for safe string appending
+    #define APPEND_TO_DETAILS(fmt, ...) do { \
+        int written = snprintf(details_ptr, remaining, fmt, __VA_ARGS__); \
+        if (written > 0 && (size_t)written < remaining) { \
+            details_ptr += written; \
+            remaining -= written; \
+        } else { \
+            remaining = 0; /* Buffer full, stop appending */ \
+        } \
+    } while(0)
     
-    // Add client ID to details
-    if (client) {
-        snprintf(client_info, sizeof(client_info), "client_id=%llu", client);
-        snprintf(details + strlen(details), sizeof(details) - strlen(details), "%s", client_info);
+    #define APPEND_LITERAL(str) do { \
+        size_t len = strlen(str); \
+        if (len < remaining) { \
+            memcpy(details_ptr, str, len); \
+            details_ptr += len; \
+            remaining -= len; \
+            *details_ptr = '\0'; \
+        } else { \
+            remaining = 0; \
+        } \
+    } while(0)
+    
+    // Initialize details buffer
+    *details_ptr = '\0';
+    
+    // Build client info efficiently
+    if (client && remaining > 0) {
+        APPEND_TO_DETAILS("client_id=%llu", client);
     }
-    if (username) {
-        snprintf(username_info, sizeof(username_info), " username=%s", username);
-        snprintf(details + strlen(details), sizeof(details) - strlen(details), "%s", username_info);
+    if (username && remaining > 0) {
+        APPEND_TO_DETAILS(" username=%s", username);
     }
-    if (ip_address) {
-        snprintf(ip_info, sizeof(ip_info), " ip=%s", ip_address);
-        snprintf(details + strlen(details), sizeof(details) - strlen(details), "%s", ip_info);
+    if (ip_address && remaining > 0) {
+        APPEND_TO_DETAILS(" ip=%s", ip_address);
     }
     
-    // For CONFIG commands, add the subcommand and parameter
-    if (is_config_cmd) {
+    // Add command-specific details
+    if (is_config_cmd && remaining > 0) {
         const ValkeyModuleString *subcmd_arg = ValkeyModule_CommandFilterArgGet(filter, 1);
         if (subcmd_arg != NULL) {
             size_t subcmd_len;
             const char *subcmd_str = ValkeyModule_StringPtrLen(subcmd_arg, &subcmd_len);
             
-            size_t details_len = strlen(details);
-            if (details_len > 0) {
-                snprintf(details + details_len, sizeof(details) - details_len, " ");
-                details_len += 1; 
-            }
+            APPEND_TO_DETAILS(" subcommand=%s", subcmd_str);
             
-            snprintf(details + details_len, sizeof(details) - details_len, "subcommand=");
-            details_len += 11; 
-            
-            snprintf(details + details_len, sizeof(details) - details_len, "%s", subcmd_str);
-            details_len += strlen(subcmd_str);
-            
-            // Get parameter for GET/SET subcmd
-            if ((strcasecmp(subcmd_str, "get") == 0 || strcasecmp(subcmd_str, "set") == 0)) {
+            // Only get parameter for GET/SET - check length first for efficiency
+            if (remaining > 0 && subcmd_len == 3 && 
+                (strncasecmp(subcmd_str, "get", 3) == 0 || strncasecmp(subcmd_str, "set", 3) == 0)) {
                 const ValkeyModuleString *param_arg = ValkeyModule_CommandFilterArgGet(filter, 2);
                 if (param_arg != NULL) {
                     size_t param_len;
                     const char *param_str = ValkeyModule_StringPtrLen(param_arg, &param_len);
-                    
-                    snprintf(details + details_len, sizeof(details) - details_len, " param=");
-                    details_len += 7; 
-                    
-                    snprintf(details + details_len, sizeof(details) - details_len, "%s", param_str);
-                    // No need to update details_len here if it's not used further
+                    APPEND_TO_DETAILS(" param=%s", param_str);
                 }
             }
         }
-    }
-    // For AUTH commands, add redacted password
-    else if (is_auth_cmd) {
-        size_t details_len = strlen(details);
-
-        if (details_len > 0) {
-            snprintf(details + details_len, sizeof(details) - details_len, " ");
-            details_len += 1;
-        }
-        
-        snprintf(details + details_len, sizeof(details) - details_len, "password=<REDACTED>");
-    }
-    // For KEY commands, add key name and optionally payload
-    else if (is_key_cmd) {
-        AuditModuleCommandInfo *cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
-        
+    } else if (is_auth_cmd && remaining > 0) {
+        APPEND_LITERAL(" password=<REDACTED>");
+    } else if (is_key_cmd && remaining > 0) {
         // Add key name if available
         if (cmd_info && cmd_info->firstkey > 0) {
-            int key_idx = cmd_info->firstkey;
-            const ValkeyModuleString *key_arg = ValkeyModule_CommandFilterArgGet(filter, key_idx);
-            
+            const ValkeyModuleString *key_arg = ValkeyModule_CommandFilterArgGet(filter, cmd_info->firstkey);
             if (key_arg != NULL) {
                 size_t key_len;
                 const char *key_str = ValkeyModule_StringPtrLen(key_arg, &key_len);
-                
-                size_t details_len = strlen(details);
-
-                if (details_len > 0) {
-                    snprintf(details + details_len, sizeof(details) - details_len, " ");
-                    details_len += 1;
-                }
-                
-                snprintf(details + details_len, sizeof(details) - details_len, "key=");
-                details_len += 4;
-                
-                snprintf(details + details_len, sizeof(details) - details_len, "%s", key_str);            }
+                APPEND_TO_DETAILS(" key=%s", key_str);
+            }
         }
         
-        // Include payload if enabled
-        if (!config.disable_payload) {
-            // Look for potential payload after the key
-            int payload_idx = cmd_info && cmd_info->firstkey > 0 ? cmd_info->firstkey + 1 : 1;
+        // Include payload if enabled and there's space
+        if (!config.disable_payload && remaining > 0 && cmd_info) {
+            int payload_idx = cmd_info->firstkey > 0 ? cmd_info->firstkey + 1 : 1;
             const ValkeyModuleString *payload_arg = ValkeyModule_CommandFilterArgGet(filter, payload_idx);
             
             if (payload_arg != NULL) {
                 size_t payload_len;
                 const char *payload_str = ValkeyModule_StringPtrLen(payload_arg, &payload_len);
                 
-                // Limit payload size if configured
-                if (payload_len > config.max_payload_size) {
-                    payload_len = config.max_payload_size;
+                // Limit payload size
+                size_t max_payload = config.max_payload_size;
+                if (payload_len > max_payload) {
+                    payload_len = max_payload;
                 }
                 
                 if (payload_len > 0) {
-                    size_t details_len = strlen(details);
-
-                    if (details_len > 0) {
-                        snprintf(details + details_len, sizeof(details) - details_len, " ");
-                        details_len += 1; 
+                    APPEND_TO_DETAILS(" payload=%.*s", (int)payload_len, payload_str);
+                    
+                    // Add truncation indicator if needed
+                    if (payload_len == max_payload && remaining > 0) {
+                        APPEND_LITERAL("...(truncated)");
                     }
-                    
-                    snprintf(details + details_len, sizeof(details) - details_len, "payload=");
-                    details_len += 8; 
-                    
-                    // Copy payload up to max length
-                    size_t remaining = sizeof(details) - details_len - 1;
-                    size_t copy_len = payload_len < remaining ? payload_len : remaining;
-                    
-                    // For a potentially non-null-terminated string, use precision in the format string
-                    snprintf(details + details_len, sizeof(details) - details_len, "%.*s", (int)copy_len, payload_str);
-                    details_len += copy_len;
-                    
-                    // Indicate truncation if needed
-                    if (payload_len > config.max_payload_size) {
-                        snprintf(details + details_len, sizeof(details) - details_len, "... (truncated)");
-                    }                
                 }
             }
         }
-    }
-    // For OTHER commands, add basic argument information
-    else if (is_other_cmd) {
-        // Add first few arguments for context
+    } else if (is_other_cmd && remaining > 0) {
+        // Add first few arguments efficiently
         int argc = ValkeyModule_CommandFilterArgsCount(filter);
-        int max_args_to_log = 3; 
+        int max_args_to_log = 3;
         
-        for (int i = 1; i < argc && i <= max_args_to_log; i++) {
+        for (int i = 1; i < argc && i <= max_args_to_log && remaining > 0; i++) {
             const ValkeyModuleString *arg = ValkeyModule_CommandFilterArgGet(filter, i);
             if (arg != NULL) {
                 size_t arg_len;
                 const char *arg_str = ValkeyModule_StringPtrLen(arg, &arg_len);
                 
-                size_t details_len = strlen(details);
-                if (details_len > 0) {
-                    snprintf(details + details_len, sizeof(details) - details_len, " ");
-                    details_len += 1;
-                }
-                
-                // Limit argument length to prevent log overflow
+                // Limit argument length
                 size_t max_arg_len = 50;
                 if (arg_len > max_arg_len) {
-                    snprintf(details + details_len, sizeof(details) - details_len, "arg%d=%.50s...", i, arg_str);
+                    APPEND_TO_DETAILS(" arg%d=%.50s...", i, arg_str);
                 } else {
-                    snprintf(details + details_len, sizeof(details) - details_len, "arg%d=%.*s", i, (int)arg_len, arg_str);
+                    APPEND_TO_DETAILS(" arg%d=%.*s", i, (int)arg_len, arg_str);
                 }
             }
         }
         
-        // Indicate if there are more arguments
-        if (argc > max_args_to_log + 1) {
-            size_t details_len = strlen(details);
-            snprintf(details + details_len, sizeof(details) - details_len, " (and %d more args)", argc - max_args_to_log - 1);
+        // Indicate additional arguments
+        if (argc > max_args_to_log + 1 && remaining > 0) {
+            APPEND_TO_DETAILS(" (and %d more args)", argc - max_args_to_log - 1);
         }
     }
     
-    // Determine category string for the log
-    const char *category_str;
-    if (is_config_cmd) {
-        category_str = "CONFIG";
-    } else if (is_auth_cmd) {
-        category_str = "AUTH";
-    } else if (is_key_cmd) {
-        category_str = "KEY_OP";
-    } else if (is_other_cmd) {
-        category_str = "OTHER";
-    } else { // Should not happen
-        category_str = "COMMAND";
-    }
+    #undef APPEND_TO_DETAILS
+    #undef APPEND_LITERAL
+    
+    // Ensure null termination
+    details[sizeof(details) - 1] = '\0';
     
     // Log the audit event
-    logAuditEvent(category_str, command_str, details, username, ip_address, client_port, EVENT_EXECUTE);
+    logAuditEvent(category_str, cmd_str, details, username, ip_address, client_port, EVENT_EXECUTE);
 }
 
 // to be removed
