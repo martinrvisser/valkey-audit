@@ -732,7 +732,8 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                     if "payload" in details:
                         self.assertIn(max_value, details)
                         parts = details.split("payload=")
-                        result = parts[1].strip()
+                        result = parts[1].strip().replace("...(truncated)", "")
+                        #import pdb; pdb.set_trace()
                         self.assertTrue(len(result) <= 10)
             except json.JSONDecodeError:
                 continue
