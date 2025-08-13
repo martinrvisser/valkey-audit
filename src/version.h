@@ -2,7 +2,7 @@
 
 #define VALKEYAUDIT_VERSION_MAJOR 0
 #define VALKEYAUDIT_VERSION_MINOR 0
-#define VALKEYAUDIT_VERSION_PATCH 8
+#define VALKEYAUDIT_VERSION_PATCH 9
 
 #define VALKEYAUDIT_SEMANTIC_VERSION(major, minor, patch) \
   (major * 10000 + minor * 100 + patch)
