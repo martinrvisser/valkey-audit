@@ -1,0 +1,9 @@
+port 47885
+save ""
+user martin on >mpass ~* &* +@all
+loadmodule /mnt/c/Users/mviss/OneDrive/Documents/Projects/valkey-audit/build/libvalkeyaudit.so
+audit.enabled yes
+audit.protocol file /tmp/vka-qskywuvb/audit.log
+audit.excluderules "martin"
+audit.always_audit_config yes
+

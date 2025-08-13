@@ -2950,7 +2950,7 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
 
 void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     if (config.enabled != 1) return;
-
+    
     // Get command name - cache the result to avoid repeated calls
     size_t cmd_len; 
     const ValkeyModuleString *cmd_arg = ValkeyModule_CommandFilterArgGet(filter, 0);
@@ -2958,21 +2958,11 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     
     const char *cmd_str = ValkeyModule_StringPtrLen(cmd_arg, &cmd_len);
     
-    // Fast check for audit module commands to avoid recursion
-    // Use length check first for early exit
-    if (cmd_len >= 5 && strncasecmp(cmd_str, "audit", 5) == 0) {
-        return;
-    }
-    
-    // Pre-compute command type flags using single pass through command
-    int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
-    int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
-    
     // Get client info once and cache
     unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
     ClientUsernameEntry *entry = getClientEntry(client);
     
-    // Use stack variables with defaults to avoid repeated null checks
+    // Init variables with defaults 
     char *username = "unknown";
     char *ip_address = "unknown";
     int client_port = 0;
@@ -2985,7 +2975,28 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         client_port = entry->client_port;
     }
 
-    // Early exit for no_audit unless it's a special CONFIG case
+    if (client_no_audit) {
+        if (!config.always_audit_config) {
+            return;  // no need to check command type
+        }
+    
+        // Only check command type when always_audit_config is true
+        int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
+        if (!is_config_cmd) {
+            return;  // Not CONFIG, so exit
+        }
+    }
+        
+    // Fast check for audit module commands to avoid recursion
+    // Use length check first for early exit
+    if (cmd_len >= 5 && strncasecmp(cmd_str, "audit", 5) == 0) {
+        return;
+    }
+    
+    // Pre-compute command type flags using single pass through command
+    int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
+    int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
+    
     if (client_no_audit && !(is_config_cmd && config.always_audit_config)) {
         return;
     }
