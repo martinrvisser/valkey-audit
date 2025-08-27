@@ -6,6 +6,7 @@ import io
 import statistics
 from typing import Dict, List, Tuple
 import sys
+import os
 
 class ValkeyBenchmarkRunner:
     def __init__(self):
@@ -31,6 +32,12 @@ class ValkeyBenchmarkRunner:
             {
                 "name": "4. User martin, no_audit=1, always_audit_config=yes",
                 "config": "valkey.conf.4",
+                "user": "martin", 
+                "password": "mpass"
+            },
+            {   
+                "name": "5. User martin, events=all, always_audit_config=no",
+                "config": "valkey.conf.5",
                 "user": "martin", 
                 "password": "mpass"
             }
@@ -65,7 +72,8 @@ class ValkeyBenchmarkRunner:
             '-t', 'set,get',
             '-d', '100', 
             '-c', '1',
-            '-n', '500000',
+            #'-n', '100000',
+            #'-n', '100',
             '--csv'
         ]
         
@@ -93,6 +101,7 @@ class ValkeyBenchmarkRunner:
         
         for row in reader:
             test_name = row['test']
+            print(f"testname: {test_name}")
             rps = float(row['rps'])
             avg_latency = float(row['avg_latency_ms'])
             min_latency = float(row['min_latency_ms']) 
@@ -200,8 +209,17 @@ class ValkeyBenchmarkRunner:
         print("PERFORMANCE COMPARISON (% of baseline)")
         print(f"{'='*80}")
         
-        # Use first config as baseline
-        baseline_name = list(self.results.keys())[0]
+        # Find configuration starting with "1" as baseline
+        baseline_name = None
+        for config_name in self.results.keys():
+            if config_name.strip().startswith('1.'):
+                baseline_name = config_name
+                break
+        
+        if baseline_name is None:
+            baseline_name = list(self.results.keys())[0]
+        
+        print(f"Using '{baseline_name}' as baseline\n")
         baseline_results = self.results[baseline_name]
         
         header = f"{'Configuration':<40} {'SET RPS':<10} {'GET RPS':<10} {'SET Avg':<10} {'GET Avg':<10}"
@@ -211,25 +229,61 @@ class ValkeyBenchmarkRunner:
         for config_name, test_results in self.results.items():
             row = f"{config_name[:39]:<40}"
             
-            for test_type in ['SET', 'GET']:
-                if (test_type in test_results and test_results[test_type] and
-                    test_type in baseline_results and baseline_results[test_type]):
+            # Calculate all metrics first
+            set_rps_ratio = 0
+            set_latency_ratio = 0 
+            get_rps_ratio = 0
+            get_latency_ratio = 0
+            
+            # SET calculations
+            if ('SET' in test_results and test_results['SET'] and
+                'SET' in baseline_results and baseline_results['SET']):
+                
+                current_stats = self.calculate_statistics(test_results['SET'])
+                baseline_stats = self.calculate_statistics(baseline_results['SET'])
+                
+                if 'rps' in current_stats and 'rps' in baseline_stats:
+                    set_rps_ratio = (current_stats['rps']['mean'] / baseline_stats['rps']['mean']) * 100
                     
-                    current_stats = self.calculate_statistics(test_results[test_type])
-                    baseline_stats = self.calculate_statistics(baseline_results[test_type])
+                if 'avg_latency_ms' in current_stats and 'avg_latency_ms' in baseline_stats:
+                    set_latency_ratio = (current_stats['avg_latency_ms']['mean'] / baseline_stats['avg_latency_ms']['mean']) * 100
+            
+            # GET calculations  
+            if ('GET' in test_results and test_results['GET'] and
+                'GET' in baseline_results and baseline_results['GET']):
+                
+                current_stats = self.calculate_statistics(test_results['GET'])
+                baseline_stats = self.calculate_statistics(baseline_results['GET'])
+                
+                if 'rps' in current_stats and 'rps' in baseline_stats:
+                    get_rps_ratio = (current_stats['rps']['mean'] / baseline_stats['rps']['mean']) * 100
                     
-                    rps_ratio = (current_stats['rps']['mean'] / baseline_stats['rps']['mean']) * 100
-                    latency_ratio = (current_stats['avg_latency_ms']['mean'] / baseline_stats['avg_latency_ms']['mean']) * 100
-                    
-                    if test_type == 'SET':
-                        row += f"{rps_ratio:8.1f}%  {latency_ratio:8.1f}%  "
-                    else:
-                        row += f"{rps_ratio:8.1f}%  {latency_ratio:8.1f}%"
-                else:
-                    row += "    N/A      N/A  " if test_type == 'SET' else "    N/A      N/A"
+                if 'avg_latency_ms' in current_stats and 'avg_latency_ms' in baseline_stats:
+                    get_latency_ratio = (current_stats['avg_latency_ms']['mean'] / baseline_stats['avg_latency_ms']['mean']) * 100
+            
+            # Format output with consistent spacing
+            if set_rps_ratio > 0:
+                row += f"{set_rps_ratio:8.1f}%  "
+            else:
+                row += "    N/A    "
+                
+            if get_rps_ratio > 0:
+                row += f"{get_rps_ratio:8.1f}%  "
+            else:
+                row += "    N/A    "
+                
+            if set_latency_ratio > 0:
+                row += f"{set_latency_ratio:8.1f}%  "
+            else:
+                row += "    N/A    "
+                
+            if get_latency_ratio > 0:
+                row += f"{get_latency_ratio:8.1f}%"
+            else:
+                row += "    N/A"
             
             print(row)
-    
+
     def run_all_tests(self, iterations: int = 3):
         """Run all test configurations"""
         print("Starting Valkey Performance Test Suite")
@@ -241,7 +295,26 @@ class ValkeyBenchmarkRunner:
         self.print_summary()
         self.print_comparison_table()
 
+def createifnotexists_directory(directory_path):
+    """
+    Checks if a directory exists at the given path. If it does not,
+    create it including any necessary parent directories.
+    """
+    if not os.path.exists(directory_path):
+        print(f"Directory '{directory_path}' does not exist. Creating it...")
+        try:
+            os.makedirs(directory_path)
+            print(f"Directory '{directory_path}' created successfully.")
+        except OSError as error:
+            print(f"Error: Could not create directory '{directory_path}'.")
+            print(f"Reason: {error}")
+    else:
+        print(f"Directory '{directory_path}' already exists.")
+
 def main():
+    auditdir = '/tmp/vkaperf'
+    createifnotexists_directory(auditdir)
+
     runner = ValkeyBenchmarkRunner()
     
     # Check if iterations specified as command line argument
