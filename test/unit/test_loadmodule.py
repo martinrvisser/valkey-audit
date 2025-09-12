@@ -268,7 +268,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
     def test_enable_parameter(self):
         """Test enable parameter (on/off)."""
         # Test enabled
-        config_path = self.create_config_file(["enable", "yes"], test_name="enable_yes")
+        config_path = self.create_config_file(["enabled", "yes"], test_name="enable_yes")
         self.start_server(config_path)
         
         self.client.set("key1", "value1")
@@ -281,7 +281,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
     
     def test_disable_parameter(self):
         """Test disable parameter."""
-        config_path = self.create_config_file(["enable", "no"], test_name="enable_no")
+        config_path = self.create_config_file(["enabled", "no"], test_name="enable_no")
         self.start_server(config_path)
         
         self.client.set("key2", "value2")

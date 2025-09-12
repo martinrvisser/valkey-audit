@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "valkeymodule.h"
 #include "module.h"
 #include "version.h"
@@ -22,6 +21,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+/* for metrics */
+#include "audit_metrics.h"
 
 static char server_hostname[HOST_NAME_MAX];
 static int loglevel_debug = 0;
@@ -615,6 +616,8 @@ static int connectTcp(void) {
     if (config.tcp_max_retries > 0 && config.tcp_retry_count >= config.tcp_max_retries) {
         if (!config.tcp_reconnect_on_failure) {
             fprintf(stderr, "TCP connection failed after %d attempts, giving up\n", config.tcp_retry_count);
+            audit_metrics_inc_error();
+            audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_ERROR);
             return -1;
         }
         /* Reset retry count if we're configured to keep trying */
@@ -631,6 +634,8 @@ static int connectTcp(void) {
     /* Get address info */
     if ((rv = getaddrinfo(config.tcp_host, port_str, &hints, &servinfo)) != 0) {
         fprintf(stderr, "getaddrinfo failed: %s\n", gai_strerror(rv));
+        audit_metrics_inc_error();
+        audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_ERROR);
         return -1;
     }
     
@@ -660,6 +665,10 @@ static int connectTcp(void) {
             int poll_result = poll(&pfd, 1, config.tcp_timeout_ms);
             
             if (poll_result <= 0) {
+                if (poll_result == 0) {
+                    fprintf(stderr, "TCP connection timeout to %s:%d\n", config.tcp_host, config.tcp_port);
+                }
+
                 /* Timeout or error */
                 close(sockfd);
                 sockfd = -1;
@@ -682,12 +691,19 @@ static int connectTcp(void) {
         /* Connection successful */
         config.tcp_socket = sockfd;
         fprintf(stderr, "Connected to TCP audit server %s:%d\n", config.tcp_host, config.tcp_port);
+        
+        audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_CONNECTED);
+        
         freeaddrinfo(servinfo);
         return 0;
     }
     
     /* Failed to connect to any address */
     fprintf(stderr, "Failed to connect to TCP audit server %s:%d\n", config.tcp_host, config.tcp_port);
+
+    audit_metrics_inc_error();
+    audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_ERROR);
+
     freeaddrinfo(servinfo);
     return -1;
 }
@@ -695,6 +711,7 @@ static int connectTcp(void) {
 // Write data to TCP connection
 static int writeToTcp(const char *data, size_t len) {
     if (config.tcp_socket == -1) {
+        audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
         return -1;
     }
     
@@ -717,12 +734,17 @@ static int writeToTcp(const char *data, size_t len) {
             }
             
             fprintf(stderr, "TCP send error: %s\n", strerror(errno));
+            audit_metrics_inc_error();
+            audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_ERROR);
+
             return -1;
         }
         
         total_sent += sent;
     }
     
+    audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_CONNECTED);
+
     return 0;
 }
 
@@ -732,6 +754,7 @@ static void closeTcp(void) {
         close(config.tcp_socket);
         config.tcp_socket = -1;
     }
+    audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
     config.tcp_connected = 0;
 }
 
@@ -805,10 +828,13 @@ static size_t circularBufferRead(char *dest, size_t max_len) {
     return to_read;
 }
 
+
 void writeAuditLog(const char *format, ...) {
     if (!config.enabled || !format) {
         return;
     }
+    
+    audit_metrics_inc_event(); 
     
     /* Format message */
     va_list args;
@@ -838,8 +864,9 @@ void writeAuditLog(const char *format, ...) {
                     ssize_t bytes_written = write(config.file_fd, message, len);
                     if (bytes_written == -1) {
                         // Only handle complete error - partial writes should result in complete error
-                                ValkeyModule_Log(NULL, "warning", "Audit: Error writing to audit log");
-                    };
+                        ValkeyModule_Log(NULL, "warning", "Audit: Error writing to audit log");
+                        audit_metrics_inc_error();  
+                    }
                 }
                 break;
                 
@@ -853,12 +880,15 @@ void writeAuditLog(const char *format, ...) {
                 
             case PROTOCOL_TCP:
                 if (config.tcp_connected) {
-                    writeToTcp(message, len);
+                    int tcp_result = writeToTcp(message, len);
+                    if (tcp_result < 0) {
+                        audit_metrics_inc_error();
+                    }
                 }
                 break;
         }
     } else {
-        /* Buffered output */
+        // Buffered output
         pthread_mutex_lock(&config.buffer_mutex);
         size_t written = circularBufferWrite(message, len);
         
@@ -872,6 +902,7 @@ void writeAuditLog(const char *format, ...) {
         /* If we couldn't write all data, log an error */
         if (written < len) {
             fprintf(stderr, "Audit log buffer full, discarded %zu bytes\n", len - written);
+            audit_metrics_inc_error();
         }
     }
     
@@ -2001,11 +2032,14 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
             close(config.file_fd);
             config.file_fd = -1;
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_DISCONNECTED);
         } else if (config.protocol == PROTOCOL_SYSLOG) {
             closelog();
+            audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_DISCONNECTED);
         } else if (config.protocol == PROTOCOL_TCP && config.tcp_socket != -1) {
             close(config.tcp_socket);
             config.tcp_socket = -1;
+            audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
         }
         
         // Free existing file_path if any
@@ -2034,7 +2068,10 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
         if (config.file_fd == -1) {
             *err = ValkeyModule_CreateString(NULL, "ERR Failed to open audit log file", 32);
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_ERROR);
             return VALKEYMODULE_ERR;
+        } else {
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_CONNECTED);
         }
         
         return VALKEYMODULE_OK;
@@ -2064,11 +2101,14 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
             close(config.file_fd);
             config.file_fd = -1;
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_DISCONNECTED);
         } else if (config.protocol == PROTOCOL_SYSLOG) {
             closelog();
+            audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_DISCONNECTED);
         } else if (config.protocol == PROTOCOL_TCP && config.tcp_socket != -1) {
             close(config.tcp_socket);
             config.tcp_socket = -1;
+            audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
         }
         
         // Free existing file_path if any
@@ -2089,6 +2129,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         
         // Initialize syslog
         openlog("valkey-audit", LOG_PID, config.syslog_facility);
+        audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_CONNECTED);
         
         return VALKEYMODULE_OK;
     }
@@ -2977,12 +3018,14 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
 
     if (client_no_audit) {
         if (!config.always_audit_config) {
+            audit_metrics_inc_exclusion();
             return;  // no need to check command type
         }
     
         // Only check command type when always_audit_config is true
         int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
         if (!is_config_cmd) {
+            audit_metrics_inc_exclusion();
             return;  // Not CONFIG, so exit
         }
     }
@@ -2998,6 +3041,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
     
     if (client_no_audit && !(is_config_cmd && config.always_audit_config)) {
+        audit_metrics_inc_exclusion();
         return;
     }
 
@@ -3039,6 +3083,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     
     // Early exit if no category matches
     if (!category_match) {
+        audit_metrics_inc_exclusion();
         return;
     }
     
@@ -3213,7 +3258,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
         const char *arg = ValkeyModule_StringPtrLen(argv[i], &arglen);
         
         // Handle enable argument
-        if (i < argc-1 && strcasecmp(arg, "enable") == 0) {
+        if (i < argc-1 && strcasecmp(arg, "enabled") == 0) {
             const char *enabled = ValkeyModule_StringPtrLen(argv[i+1], NULL);
             i++;
         
@@ -3494,6 +3539,11 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         }
     }
     ValkeyModule_FreeCallReply(reply);
+
+    // Initialize metrics
+    audit_metrics_init();
+    if (audit_metrics_register_info(ctx) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;  
 
     // Initialize audit logging system
     if (initAuditLog(&config) != 0) {
