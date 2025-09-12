@@ -1,8 +1,9 @@
+#include "server.h"
 #ifndef VALKEYAUDIT_MODULE_VERSION
 
 #define VALKEYAUDIT_VERSION_MAJOR 0
-#define VALKEYAUDIT_VERSION_MINOR 1
-#define VALKEYAUDIT_VERSION_PATCH 0
+#define VALKEYAUDIT_VERSION_MINOR 0
+#define VALKEYAUDIT_VERSION_PATCH 4
 
 #define VALKEYAUDIT_SEMANTIC_VERSION(major, minor, patch) \
   (major * 10000 + minor * 100 + patch)

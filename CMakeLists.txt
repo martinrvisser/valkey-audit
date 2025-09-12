@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(ValkeyAudit VERSION 0.0.1 DESCRIPTION "Valkey Audit module")
 
 find_package(Git)
+find_package(Threads REQUIRED)
 message(STATUS "GIT_EXECUTABLE='${GIT_EXECUTABLE}'")
 include(GNUInstallDirs)
 
@@ -31,7 +32,7 @@ configure_file(${FETCHCONTENT_BASE_DIR}/valkey-src/src/valkeymodule.h ${CMAKE_CU
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/test/valkey.conf ${CMAKE_CURRENT_BINARY_DIR} COPYONLY)
 
 # CHANGED: Conditional flags based on build type
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -Wunused -Wunused-parameter")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -Wunused -Wunused-parameter -pthread")
 
 # Performance-focused flags for Release builds
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -mtune=native -flto")
@@ -53,17 +54,34 @@ target_include_directories(valkeyaudit PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
+target_link_libraries(valkeyaudit PRIVATE Threads::Threads)
+
+target_compile_definitions(valkeyaudit PRIVATE
+    _GNU_SOURCE
+    _REENTRANT
+    _THREAD_SAFE
+)
+
+# 🔥 ADD: Thread-safe compilation options
+target_compile_options(valkeyaudit PRIVATE
+    -fPIC
+    -pthread
+)
+
 set_target_properties(valkeyaudit PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
     COMPILE_WARNING_AS_ERROR ON
     C_STANDARD 17
+    POSITION_INDEPENDENT_CODE ON
 )
 
 # ADDED: Print build configuration for debugging
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "C flags for ${CMAKE_BUILD_TYPE}: ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}}")
+message(STATUS "Threads found: ${Threads_FOUND}")
+message(STATUS "Thread library: ${CMAKE_THREAD_LIBS_INIT}")
 
 install(TARGETS valkeyaudit
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
