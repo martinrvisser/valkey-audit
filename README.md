@@ -178,7 +178,7 @@ CONFIG SET audit.exclude_commands "PING,ECHO,TIME"
 
 #### Exclude commands by prefix
 ```
-CONFIG SET audit.exclude_commands "FT*"
+CONFIG SET audit.exclude_commands "!FT*"
 ```
 
 #### Excluding commands through a custom category
@@ -270,3 +270,4 @@ Example in text format:
 ## License
 
 This module is licensed under the same terms as Valkey itself.
+
