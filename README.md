@@ -26,14 +26,14 @@ Add the following line to your Valkey configuration file or issue a MODULE LOAD 
 
 ```
 loadmodule /path/to/libvalkeyaudit.so
-loadmodule /path/to/libvalkeyaudit.so protocol file /var/log/audit/valkey_audit.log
+loadmodule /path/to/libvalkeyaudit.so audit.protocol "file /var/log/audit/valkey_audit.log"
 ```
 
 ### Configuring the Module
 The module uses the standard Valkey configuration facility which means that parameters can accessed with CONFIG SET and GET as well as written to the valkey.conf file with CONFIG REWRITE or manually.
 
 Available parameters:
-- `audit.enable [yes|no]`: Enable or disable auditing.
+- `audit.enabled [yes|no]`: Enable or disable auditing.
 - `audit.always_audit_config [yes|no]`: Enable or disable the auditing of config commands regardless of per user events setting. This allows the logging of config commands for a user even if the user is in the exclusion list.
 - `audit.protocol [file|syslog|tcp]`: Logging protocol to use. 
     When using the file protocol it should be followed by the filepath.
@@ -51,6 +51,7 @@ Available parameters:
 - `audit.tcp_max_retries`: maximum number of retries to establish a TCP connection.
 - `audit.tcp_buffer_on_disconnect`: buffer messages during disconnected state from target TCP destination.
 - `audit.tcp_reconnect_on_failure`: automatic reconnect to TCP destination on failure.
+- `audit.auth_result_check_delay_ms`: delay in milliseconds to delay checking for auth success
 
 
 ## Example Usage
@@ -59,8 +60,8 @@ Available parameters:
 To enable/disable auditing:
 
 ```
-CONFIG SET AUDIT.ENABLE yes
-CONFIG SET AUDIT.ENABLE no
+CONFIG SET AUDIT.ENABLED yes
+CONFIG SET AUDIT.ENABLED no
 ```
 
 To enable/disable always auditing of config commands. This will log config commands irrespective of what events are set to be audited:
@@ -75,7 +76,7 @@ CONFIG SET AUDIT.ALWAYS_AUDIT_CONFIG no
 To set the audit logging protocol, use one of:
 
 ```
-CONFIG SET AUDIT.PROTOCOL file /path/to/logfile
+CONFIG SET AUDIT.PROTOCOL "file /path/to/logfile"
 CONFIG SET AUDIT.PROTOCOL syslog local0
 CONFIG SET AUDIT.PROTOCOL tcp "127.0.0.1:9514"
 ```
@@ -167,6 +168,37 @@ CONFIG SET audit.tcp_buffer_on_disconnect yes
 CONFIG SET audit.tcp_reconnect_on_failure yes
 ```
 
+### Additional exclusion options
+Additional options to exclude are available through specific command exclusions, command prefix exclusion (e.g. for modules) and creation of a custom category
+
+#### Exclude specific commands from audit log
+```
+CONFIG SET audit.exclude_commands "PING,ECHO,TIME"
+```
+
+#### Exclude commands by prefix
+```
+CONFIG SET audit.exclude_commands "FT*"
+```
+
+#### Excluding commands through a custom category
+Custom categories can be created by the user and subsequently added to the events exclusion list
+
+##### Define custom category
+```
+CONFIG SET audit.custom_category flushes "FLUSHDB,FLUSHALL"
+```
+
+##### Define custom admin category  
+```
+CONFIG SET audit.custom_category admin "CONFIG,ACL,SAVE,BGSAVE"
+```
+
+##### Then use in event mask
+```
+CONFIG SET audit.events "connections,auth,flushes,admin"
+```
+
 ## Manual Module Testing
 
 The project has a collection of scripts to start a Valkey server using docker-compose to easily test the module.
@@ -209,8 +241,8 @@ To do: automation
 
 Example in text format:
 ```
-[2025-04-15 14:30:22] [CONNECTION] CONNECTED client_id=0x7f8a1c003a40
-[2025-04-15 14:35:15] [CONNECTION] DISCONNECTED client_id=0x7f8a1c003a40
+[2025-04-15 14:30:22] [CONNECTION] CONNECTED client_id=16
+[2025-04-15 14:35:15] [CONNECTION] DISCONNECTED client_id=16
 ```
 
 ### Authentication Events

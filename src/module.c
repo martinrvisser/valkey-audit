@@ -1,4 +1,5 @@
 #include "valkeymodule.h"
+#include "common.h"
 #include "module.h"
 #include "version.h"
 #include <stdio.h>
@@ -29,7 +30,7 @@ static int loglevel_debug = 0;
 
 static AuditConfig config = {
     .enabled = 1,
-    .protocol = PROTOCOL_FILE,
+    .protocol = AUDIT_PROTOCOL_FILE,
     .format = FORMAT_TEXT,
     .event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER,
     .disable_payload = 0,
@@ -37,7 +38,6 @@ static AuditConfig config = {
     .file_path = "audit.log",
     .syslog_facility = LOG_LOCAL0,
     .syslog_priority = LOG_NOTICE,
-    .fsync_policy = AOF_FSYNC_ALWAYS,
     
     /* Initialize fields that require runtime allocation to NULL/default values */
     .buffer = NULL,
@@ -53,7 +53,7 @@ static AuditConfig config = {
     .shutdown_flag = 0
 };
 
-/* Forward declarations */
+// Forward declarations
 static void *auditLogWorker(void *arg);
 static int connectTcp(void);
 static int writeToTcp(const char *data, size_t len);
@@ -85,170 +85,187 @@ static AuditModuleCommandInfo *last_cmd_info = NULL;
 static char last_cmd_name[64] = "";
 static size_t last_cmd_len = 0;
 
-// Static command info table (hash table)
-static AuditModuleCommandInfo *command_info_table[COMMAND_TABLE_SIZE];
 static bool command_table_initialized = false;
 
-static CommandDefinition keyCommands[] = {
+static CommandDefinition theCommands[] = {
     /* String commands */
-    {"set", 1, 1, 1, 0},
-    {"setnx", 1, 1, 1, 0},
-    {"setex", 1, 1, 1, 0},
-    {"psetex", 1, 1, 1, 0},
-    {"get", 1, 1, 1, 0},
-    {"getex", 1, 1, 1, 0},
-    {"getdel", 1, 1, 1, 0},
-    {"getset", 1, 1, 1, 0},
-    {"mget", 1, -1, 1, 0},
-    {"mset", 1, -1, 2, 0},
-    {"msetnx", 1, -1, 2, 0},
-    {"append", 1, 1, 1, 0},
-    {"strlen", 1, 1, 1, 0},
-    {"incr", 1, 1, 1, 0},
-    {"incrby", 1, 1, 1, 0},
-    {"incrbyfloat", 1, 1, 1, 0},
-    {"decr", 1, 1, 1, 0},
-    {"decrby", 1, 1, 1, 0},
-    {"setrange", 1, 1, 1, 0},
-    {"getrange", 1, 1, 1, 0},
+    {"set", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"setnx", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"setex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"psetex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"get", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"getex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"getdel", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"getset", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"mget", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"mset", 1, -1, 2, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"msetnx", 1, -1, 2, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"append", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"strlen", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"incr", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"incrby", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"incrbyfloat", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"decr", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"decrby", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"setrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"getrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Hash commands */
-    {"hset", 1, 1, 1, 0},
-    {"hsetnx", 1, 1, 1, 0},
-    {"hget", 1, 1, 1, 0},
-    {"hmset", 1, -1, 1, 0},
-    {"hmget", 1, -1, 1, 0},
-    {"hgetall", 1, 1, 1, 0},
-    {"hdel", 1, 1, 1, 0},
-    {"hlen", 1, 1, 1, 0},
-    {"hexists", 1, 1, 1, 0},
-    {"hkeys", 1, 1, 1, 0},
-    {"hvals", 1, 1, 1, 0},
-    {"hincrby", 1, 1, 1, 0},
-    {"hincrbyfloat", 1, 1, 1, 0},
-    {"hscan", 1, 1, 1, 0},
-    {"hstrlen", 1, 1, 1, 0},
+    {"hset", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hsetnx", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hget", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hmset", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hmget", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hgetall", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hdel", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hlen", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hexists", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hkeys", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hvals", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hincrby", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hincrbyfloat", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hscan", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"hstrlen", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* List commands */
-    {"lpush", 1, 1, 1, 0},
-    {"rpush", 1, 1, 1, 0},
-    {"lpop", 1, 1, 1, 0},
-    {"rpop", 1, 1, 1, 0},
-    {"llen", 1, 1, 1, 0},
-    {"lindex", 1, 1, 1, 0},
-    {"lrange", 1, 1, 1, 0},
-    {"ltrim", 1, 1, 1, 0},
-    {"lset", 1, 1, 1, 0},
-    {"linsert", 1, 1, 1, 0},
-    {"lrem", 1, 1, 1, 0},
-    {"lpushx", 1, 1, 1, 0},
-    {"rpushx", 1, 1, 1, 0},
-    {"blpop", 1, -1, 1, 0},
-    {"brpop", 1, -1, 1, 0},
-    {"brpoplpush", 1, 2, 1, 0},
-    {"rpoplpush", 1, 2, 1, 0},
+    {"lpush", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"rpush", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lpop", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"rpop", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"llen", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lindex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"ltrim", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lset", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"linsert", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lrem", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"lpushx", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"rpushx", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"blpop", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"brpop", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"brpoplpush", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"rpoplpush", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Set commands */
-    {"sadd", 1, 1, 1, 0},
-    {"srem", 1, 1, 1, 0},
-    {"smembers", 1, 1, 1, 0},
-    {"sismember", 1, 1, 1, 0},
-    {"scard", 1, 1, 1, 0},
-    {"spop", 1, 1, 1, 0},
-    {"srandmember", 1, 1, 1, 0},
-    {"smove", 1, 2, 1, 0},
-    {"sscan", 1, 1, 1, 0},
-    {"smismember", 1, 1, 1, 0},
+    {"sadd", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"srem", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"smembers", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sismember", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"scard", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"spop", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"srandmember", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"smove", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sscan", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"smismember", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Sorted Set commands */
-    {"zadd", 1, 1, 1, 0},
-    {"zrem", 1, 1, 1, 0},
-    {"zrange", 1, 1, 1, 0},
-    {"zcard", 1, 1, 1, 0},
-    {"zrevrange", 1, 1, 1, 0},
-    {"zrangebyscore", 1, 1, 1, 0},
-    {"zrevrangebyscore", 1, 1, 1, 0},
-    {"zcount", 1, 1, 1, 0},
-    {"zrank", 1, 1, 1, 0},
-    {"zrevrank", 1, 1, 1, 0},
-    {"zscore", 1, 1, 1, 0},
-    {"zincrby", 1, 1, 1, 0},
-    {"zremrangebyrank", 1, 1, 1, 0},
-    {"zremrangebyscore", 1, 1, 1, 0},
-    {"zremrangebylex", 1, 1, 1, 0},
-    {"zrangebylex", 1, 1, 1, 0},
-    {"zrevrangebylex", 1, 1, 1, 0},
-    {"zlexcount", 1, 1, 1, 0},
-    {"zscan", 1, 1, 1, 0},
-    {"zpopmin", 1, 1, 1, 0},
-    {"zpopmax", 1, 1, 1, 0},
-    {"bzpopmin", 1, -1, 1, 0},
-    {"bzpopmax", 1, -1, 1, 0},
+    {"zadd", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrem", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zcard", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrevrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrangebyscore", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrevrangebyscore", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zcount", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrank", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrevrank", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zscore", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zincrby", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zremrangebyrank", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zremrangebyscore", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zremrangebylex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrangebylex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zrevrangebylex", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zlexcount", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zscan", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zpopmin", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zpopmax", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"bzpopmin", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"bzpopmax", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Key space commands */
-    {"del", 1, -1, 1, 0},
-    {"exists", 1, -1, 1, 0},
-    {"expire", 1, 1, 1, 0},
-    {"pexpire", 1, 1, 1, 0},
-    {"expireat", 1, 1, 1, 0},
-    {"pexpireat", 1, 1, 1, 0},
-    {"ttl", 1, 1, 1, 0},
-    {"pttl", 1, 1, 1, 0},
-    {"type", 1, 1, 1, 0},
-    {"rename", 1, 2, 1, 0},
-    {"renamenx", 1, 2, 1, 0},
-    {"persist", 1, 1, 1, 0},
-    {"dump", 1, 1, 1, 0},
-    {"restore", 1, 1, 1, 0},
-    {"touch", 1, -1, 1, 0},
-    {"unlink", 1, -1, 1, 0},
-    {"copy", 1, 2, 1, 0},
-    {"move", 1, 1, 1, 0},
-    {"object", 1, 1, 1, 0},
-    {"expiretime", 1, 1, 1, 0},
-    {"pexpiretime", 1, 1, 1, 0},
+    {"del", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"exists", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"expire", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pexpire", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"expireat", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pexpireat", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"ttl", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pttl", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"type", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"rename", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"renamenx", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"persist", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"dump", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"restore", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"touch", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"unlink", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"copy", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"move", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"object", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"expiretime", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pexpiretime", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Multi-key operations */
-    {"sunion", 1, -1, 1, 0},
-    {"sinter", 1, -1, 1, 0},
-    {"sdiff", 1, -1, 1, 0},
-    {"sunionstore", 1, -1, 1, 0},
-    {"sinterstore", 1, -1, 1, 0},
-    {"sdiffstore", 1, -1, 1, 0},
+    {"sunion", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sinter", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sdiff", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sunionstore", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sinterstore", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"sdiffstore", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Sorted set multi-key operations */
-    {"zunionstore", 1, -1, 1, 0},
-    {"zinterstore", 1, -1, 1, 0},
+    {"zunionstore", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"zinterstore", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Bit operations */
-    {"setbit", 1, 1, 1, 0},
-    {"getbit", 1, 1, 1, 0},
-    {"bitcount", 1, 1, 1, 0},
-    {"bitpos", 1, 1, 1, 0},
-    {"bitfield", 1, 1, 1, 0},
+    {"setbit", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"getbit", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"bitcount", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"bitpos", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"bitfield", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* HyperLogLog commands */
-    {"pfadd", 1, 1, 1, 0},
-    {"pfcount", 1, -1, 1, 0},
-    {"pfmerge", 1, -1, 1, 0},
+    {"pfadd", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pfcount", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"pfmerge", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Geo commands */
-    {"geoadd", 1, 1, 1, 0},
-    {"geodist", 1, 1, 1, 0},
-    {"geohash", 1, 1, 1, 0},
-    {"geopos", 1, 1, 1, 0},
-    {"georadius", 1, 1, 1, 0},
-    {"georadiusbymember", 1, 1, 1, 0},
-    {"geosearch", 1, 1, 1, 0},
-    {"geosearchstore", 1, 2, 1, 0},
+    {"geoadd", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"geodist", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"geohash", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"geopos", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"georadius", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"georadiusbymember", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"geosearch", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"geosearchstore", 1, 2, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
     /* Stream commands */
-    {"xadd", 1, 1, 1, 0},
-    {"xrange", 1, 1, 1, 0},
-    {"xrevrange", 1, 1, 1, 0},
-    {"xlen", 1, 1, 1, 0},
-    {"xread", 1, -1, 1, 0},
-    {"xreadgroup", 1, -1, 1, 0},
-    {"xgroup", 1, 1, 1, 0},
-    {"xack", 1, 1, 1, 0},
-    {"xclaim", 1, 1, 1, 0},
-    {"xautoclaim", 1, 1, 1, 0},
-    {"xpending", 1, 1, 1, 0},
-    {"xinfo", 1, 1, 1, 0},
-    {"xdel", 1, 1, 1, 0},
-    {"xtrim", 1, 1, 1, 0},
+    {"xadd", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xrevrange", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xlen", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xread", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xreadgroup", 1, -1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xgroup", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xack", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xclaim", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xautoclaim", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xpending", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xinfo", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xdel", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    {"xtrim", 1, 1, 1, 0, FILTER_AUDIT, EVENT_KEYS, 0},
+    /* for fast command comparison*/
+    {"auth", 0, 0, 0, 0, FILTER_AUDIT, EVENT_AUTH, 0},
+    {"config", 0, 0, 0, 0, FILTER_AUDIT, EVENT_CONFIG, 0},
     /* End marker */
-    {NULL, 0, 0, 0, 0}
+    {NULL, 0, 0, 0, 0, 0, 0, 0}
 };
+
+#define MAX_PREFIX_LENGTH 32
+static PrefixFilter *prefix_filters_by_length[MAX_PREFIX_LENGTH + 1] = {0};
+static int prefix_filter_count = 0;
+
+// Custom category definitions
+static CustomCategory *custom_categories_head = NULL;
+static uint32_t next_category_bit = CATEGORY_USER_DEFINED_START;
+
+// User-defined commands
+static CommandDefinition *user_commands[MAX_USER_COMMANDS] = {0};
+static CommandTableEntry command_info_table[COMMAND_TABLE_SIZE];
+int commands_added = 0;
+static int user_command_count = 0;
+
+static AuditRuntimeStats audit_filter_stats = {0};
 
 // Get current monotonic timestamp in milliseconds
 mstime_t getMonotonicMs(void) {
@@ -331,21 +348,45 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
         return NULL;
     }
 
+    // Convert to lowercase for hashing (use stack buffer for performance)
+    char lower_cmd[64];
+    char *cmd_to_hash;
+    
+    if (cmd_len < sizeof(lower_cmd)) {
+        // Fast path: use stack buffer
+        for (size_t i = 0; i < cmd_len; i++) {
+            lower_cmd[i] = tolower(cmd_name[i]);
+        }
+        lower_cmd[cmd_len] = '\0';
+        cmd_to_hash = lower_cmd;
+    } else {
+        // Slow path: very long command names (rare)
+        cmd_to_hash = ValkeyModule_Alloc(cmd_len + 1);
+        for (size_t i = 0; i < cmd_len; i++) {
+            cmd_to_hash[i] = tolower(cmd_name[i]);
+        }
+        cmd_to_hash[cmd_len] = '\0';
+    }
+
     // Check if we can return the cached command info
     if (last_cmd_info != NULL &&
         last_cmd_len == cmd_len &&
-        strncasecmp(last_cmd_name, cmd_name, cmd_len) == 0) {
+        strncasecmp(last_cmd_name, cmd_to_hash, cmd_len) == 0) {
+        if (cmd_len >= sizeof(lower_cmd)) {
+            ValkeyModule_Free(cmd_to_hash);
+        }
         return last_cmd_info;
     }
 
     // Initialize the command table if not already done
     if (!command_table_initialized) {
+        //DBG fprintf(stderr, "AUDIT INIT DEBUG | Starting command table initialization...\n");
         // Clear command table
         memset(command_info_table, 0, sizeof(command_info_table));
         
         // Fill command table
-        for (int i = 0; keyCommands[i].name != NULL; i++) {
-            const char *cmd_str = keyCommands[i].name;
+        for (int i = 0; theCommands[i].name != NULL; i++) {
+            const char *cmd_str = theCommands[i].name;
             size_t cmd_str_len = strlen(cmd_str);
             
             // Use FNV-1a hash function
@@ -355,10 +396,9 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
             size_t index = hash;
             size_t start_index = index;
             
-            while (command_info_table[index] != NULL) {
+            while (command_info_table[index].name != NULL) {  // Check .name not the whole entry
                 index = (index + 1) % COMMAND_TABLE_SIZE;
                 if (index == start_index) {
-                    // Table is full
                     fprintf(stderr, "Command table is full during initialization\n");
                     exit(EXIT_FAILURE);
                 }
@@ -371,40 +411,57 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
                 exit(EXIT_FAILURE);
             }
             
-            info->firstkey = keyCommands[i].firstkey;
-            info->lastkey = keyCommands[i].lastkey;
-            info->keystep = keyCommands[i].keystep;
-            info->flags = keyCommands[i].flags;
+            info->firstkey = theCommands[i].firstkey;
+            info->lastkey = theCommands[i].lastkey;
+            info->keystep = theCommands[i].keystep;
+            info->flags = theCommands[i].flags;
+            info->filter_action = theCommands[i].filter_action;
+            info->custom_category = theCommands[i].custom_category;
             
-            command_info_table[index] = info;
+            // Store BOTH name and info
+            command_info_table[index].name = cmd_str;   // Store the name for verification
+            command_info_table[index].info = info;      // Store the info
+            commands_added++;
         }
         command_table_initialized = true;
+        //DBGfprintf(stderr, "AUDIT INIT DEBUG | Finished initialization. Total commands added: %d.\n", commands_added);
     }
 
     // Lookup the command in the hash table
-    unsigned long hash = hash_commands(cmd_name, cmd_len) % COMMAND_TABLE_SIZE;
+    unsigned long hash = hash_commands(cmd_to_hash, cmd_len) % COMMAND_TABLE_SIZE;
     size_t index = hash;
     size_t start_index = index;
-    
+    //DBG fprintf(stderr, "AUDIT LOOKUP DEBUG | Probing for: %.*s at initial index: %zu\n", (int)cmd_len, cmd_to_hash, index);
+
     do {
-        if (command_info_table[index] != NULL) {
-            // Find the command that matches this name
-            for (int i = 0; keyCommands[i].name != NULL; i++) {
-                if (strlen(keyCommands[i].name) == cmd_len && 
-                    strncasecmp(cmd_name, keyCommands[i].name, cmd_len) == 0) {
-                    // Found the command
-                    last_cmd_info = command_info_table[index];
-                    snprintf(last_cmd_name, sizeof(last_cmd_name), "%s", cmd_name);
-                    last_cmd_name[sizeof(last_cmd_name) - 1] = '\0';
-                    last_cmd_len = cmd_len;
-                    return last_cmd_info;
+        if (command_info_table[index].name != NULL) {
+            // Compare with lowercase (command_info_table[index].name is already lowercase)
+            size_t entry_name_len = strlen(command_info_table[index].name);
+            if (entry_name_len == cmd_len && 
+                strncmp(cmd_to_hash, command_info_table[index].name, cmd_len) == 0) {  // Use strncmp not strncasecmp
+                // Found it!
+                last_cmd_info = command_info_table[index].info;
+                snprintf(last_cmd_name, sizeof(last_cmd_name), "%s", cmd_to_hash);
+                last_cmd_name[sizeof(last_cmd_name) - 1] = '\0';
+                last_cmd_len = cmd_len;
+                
+                // Free if we allocated
+                if (cmd_len >= sizeof(lower_cmd)) {
+                    ValkeyModule_Free(cmd_to_hash);
                 }
+                return last_cmd_info;
             }
+        } else {
+            break;  // Empty slot
         }
         
-        // Move to next slot (linear probing)
         index = (index + 1) % COMMAND_TABLE_SIZE;
     } while (index != start_index);
+
+    // Cleanup if we allocated
+    if (cmd_len >= sizeof(lower_cmd)) {
+        ValkeyModule_Free(cmd_to_hash);
+    }
 
     // Command not found
     return NULL;
@@ -453,7 +510,7 @@ void shutdownAuditLog(void) {
         config.file_fd = -1;
     }
     
-    if (config.protocol == PROTOCOL_SYSLOG) {
+    if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {
         closelog();
     }
     
@@ -527,7 +584,7 @@ static void *auditLogWorker(void *arg) {
             
             /* Process based on protocol */
             switch (config.protocol) {
-                case PROTOCOL_FILE:
+                case AUDIT_PROTOCOL_FILE:
                     /* Write to file */
                     if (config.file_fd != -1) {
                         ssize_t written = 0;
@@ -546,7 +603,7 @@ static void *auditLogWorker(void *arg) {
                     }
                     break;
                     
-                case PROTOCOL_SYSLOG:
+                case AUDIT_PROTOCOL_SYSLOG:
                     /* Send to syslog - split by lines */
                     {
                         char *line_start = temp_buffer;
@@ -569,7 +626,7 @@ static void *auditLogWorker(void *arg) {
                     }
                     break;
                     
-                case PROTOCOL_TCP:
+                case AUDIT_PROTOCOL_TCP:
                     /* Send to TCP endpoint */
                     if (!config.tcp_connected) {
                         /* Try to connect if not connected */
@@ -828,7 +885,6 @@ static size_t circularBufferRead(char *dest, size_t max_len) {
     return to_read;
 }
 
-
 void writeAuditLog(const char *format, ...) {
     if (!config.enabled || !format) {
         return;
@@ -859,7 +915,7 @@ void writeAuditLog(const char *format, ...) {
     if (config.buffer_size == 0) {
         /* Unbuffered output */
         switch (config.protocol) {
-            case PROTOCOL_FILE:
+            case AUDIT_PROTOCOL_FILE:
                 if (config.file_fd != -1) {
                     ssize_t bytes_written = write(config.file_fd, message, len);
                     if (bytes_written == -1) {
@@ -870,7 +926,7 @@ void writeAuditLog(const char *format, ...) {
                 }
                 break;
                 
-            case PROTOCOL_SYSLOG:
+            case AUDIT_PROTOCOL_SYSLOG:
                 /* Remove newline for syslog */
                 if (message[len-1] == '\n') {
                     message[len-1] = '\0';
@@ -878,7 +934,7 @@ void writeAuditLog(const char *format, ...) {
                 syslog(config.syslog_priority | config.syslog_facility, "%s", message);
                 break;
                 
-            case PROTOCOL_TCP:
+            case AUDIT_PROTOCOL_TCP:
                 if (config.tcp_connected) {
                     int tcp_result = writeToTcp(message, len);
                     if (tcp_result < 0) {
@@ -973,6 +1029,46 @@ static void logAuditEvent(const char *category, const char *command, const char 
     }
     
     writeAuditLog("%s", buffer);
+}
+
+// Function to gather current filter statistics
+AuditFilterStats getAuditFilterStats(void) {
+    AuditFilterStats stats = {0};
+    
+    // Gather snapshot data
+    stats.hash_table_size = COMMAND_TABLE_SIZE;
+    stats.user_commands_count = user_command_count;
+    stats.user_commands_max = MAX_USER_COMMANDS;
+    stats.prefix_filters_count = prefix_filter_count;
+    
+    // Count hash table usage
+    stats.hash_table_used = 0;
+    for (int i = 0; i < COMMAND_TABLE_SIZE; i++) {
+        if (command_info_table[i].name != NULL) {  
+            stats.hash_table_used++;
+        }
+    }
+    
+    // Count custom categories
+    stats.custom_categories_count = 0;
+    CustomCategory *cat = custom_categories_head;
+    while (cat) {
+        stats.custom_categories_count++;
+        cat = cat->next;
+    }
+    
+    return stats;
+}
+
+// Function to get a copy of runtime statistics
+AuditRuntimeStats getAuditRuntimeStats(void) {
+    AuditRuntimeStats stats;
+
+    stats.prefix_filter_checks = audit_filter_stats.prefix_filter_checks;
+    stats.prefix_filter_matches = audit_filter_stats.prefix_filter_matches;
+    stats.custom_category_matches = audit_filter_stats.custom_category_matches;
+    stats.user_command_lookups = audit_filter_stats.user_command_lookups;
+    return stats;
 }
 
 /////   Section for exclusion rules functions  /////
@@ -1938,6 +2034,410 @@ int scheduleAuthResultCheck(ValkeyModuleCtx *ctx, uint64_t client_id) {
     return VALKEYMODULE_OK;
 }
 
+
+/////  Section for filtering functions /////
+// Initialize prefix filters
+void initPrefixFilters(void) {
+    for (int i = 0; i <= MAX_PREFIX_LENGTH; i++) {
+        prefix_filters_by_length[i] = NULL;
+    }
+    prefix_filter_count = 0;
+}
+
+// Add a prefix filter
+int addPrefixFilter(const char *prefix_str, uint32_t filter_action, uint32_t custom_category) {
+    if (!prefix_str || strlen(prefix_str) == 0) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    size_t prefix_len = strlen(prefix_str);
+    
+    // Remove trailing wildcard if present
+    if (prefix_str[prefix_len - 1] == '*') {
+        prefix_len--;
+    }
+    
+    if (prefix_len == 0 || prefix_len > MAX_PREFIX_LENGTH) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Check for duplicate
+    PrefixFilter *existing = prefix_filters_by_length[prefix_len];
+    while (existing) {
+        if (strncasecmp(existing->prefix, prefix_str, prefix_len) == 0) {
+            // Update existing filter
+            existing->filter_action = filter_action;
+            existing->custom_category = custom_category;
+            return VALKEYMODULE_OK;
+        }
+        existing = existing->next;
+    }
+    
+    // Create new filter
+    PrefixFilter *filter = ValkeyModule_Alloc(sizeof(PrefixFilter));
+    if (!filter) return VALKEYMODULE_ERR;
+    
+    filter->prefix = ValkeyModule_Alloc(prefix_len + 1);
+    if (!filter->prefix) {
+        ValkeyModule_Free(filter);
+        return VALKEYMODULE_ERR;
+    }
+    
+    strncpy(filter->prefix, prefix_str, prefix_len);
+    filter->prefix[prefix_len] = '\0';
+    filter->prefix_len = prefix_len;
+    filter->filter_action = filter_action;
+    filter->custom_category = custom_category;
+    
+    // Add to appropriate length bin
+    filter->next = prefix_filters_by_length[prefix_len];
+    prefix_filters_by_length[prefix_len] = filter;
+    prefix_filter_count++;
+    
+    return VALKEYMODULE_OK;
+}
+
+// Check if command matches any prefix filter
+// Returns: -1 if no match, filter_action if matched
+static inline int checkPrefixFilters(const char *cmd_str, size_t cmd_len, uint32_t *out_category) {
+    audit_filter_stats.prefix_filter_checks++;
+    
+    // Check prefix lengths from longest to shortest for specificity
+    for (int len = (cmd_len < MAX_PREFIX_LENGTH ? cmd_len : MAX_PREFIX_LENGTH); len > 0; len--) {
+        PrefixFilter *filter = prefix_filters_by_length[len];
+        
+        while (filter) {
+            if (filter->prefix_len <= cmd_len) {
+                // Case-insensitive prefix comparison
+                int match = 1;
+                for (size_t i = 0; i < filter->prefix_len; i++) {
+                    if (tolower(cmd_str[i]) != tolower(filter->prefix[i])) {
+                        match = 0;
+                        break;
+                    }
+                }
+                
+                if (match) {
+                    audit_filter_stats.prefix_filter_matches++;
+                    if (out_category) {
+                        *out_category = filter->custom_category;
+                    }
+                    return filter->filter_action;
+                }
+            }
+            filter = filter->next;
+        }
+    }
+    
+    return -1;  // No match
+}
+
+// Free all prefix filters
+void freePrefixFilters(void) {
+    for (int i = 0; i <= MAX_PREFIX_LENGTH; i++) {
+        PrefixFilter *current = prefix_filters_by_length[i];
+        while (current) {
+            PrefixFilter *next = current->next;
+            ValkeyModule_Free(current->prefix);
+            ValkeyModule_Free(current);
+            current = next;
+        }
+        prefix_filters_by_length[i] = NULL;
+    }
+    prefix_filter_count = 0;
+}
+
+// Initialize custom categories
+void initCustomCategories(void) {
+    custom_categories_head = NULL;
+    next_category_bit = CATEGORY_USER_DEFINED_START;
+}
+
+// Find or create a custom category
+uint32_t getOrCreateCategory(const char *category_name) {
+    if (!category_name || strlen(category_name) == 0) {
+        return 0;
+    }
+    
+    // Search for existing category
+    CustomCategory *cat = custom_categories_head;
+    while (cat) {
+        if (strcasecmp(cat->name, category_name) == 0) {
+            return cat->bitmask;
+        }
+        cat = cat->next;
+    }
+    
+    // Create new category
+    if (next_category_bit == 0) {
+        // Overflow - too many categories
+        return 0;
+    }
+    
+    cat = ValkeyModule_Alloc(sizeof(CustomCategory));
+    if (!cat) return 0;
+    
+    cat->name = ValkeyModule_Strdup(category_name);
+    if (!cat->name) {
+        ValkeyModule_Free(cat);
+        return 0;
+    }
+    
+    cat->bitmask = next_category_bit;
+    next_category_bit = next_category_bit << 1;  // Next bit pos
+    
+    // Add to list
+    cat->next = custom_categories_head;
+    custom_categories_head = cat;
+    
+    return cat->bitmask;
+}
+
+// Get category name from bitmask (for display)
+const char* getCategoryName(uint32_t bitmask) {
+    if (bitmask < CATEGORY_USER_DEFINED_START) {
+        // Built-in categories
+        if (bitmask & EVENT_CONNECTIONS) return "CONNECTIONS";
+        if (bitmask & EVENT_AUTH) return "AUTH";
+        if (bitmask & EVENT_CONFIG) return "CONFIG";
+        if (bitmask & EVENT_KEYS) return "KEY_OP";
+        if (bitmask & EVENT_OTHER) return "OTHER";
+        return "unknown";
+    }
+    
+    // User-defined categories
+    CustomCategory *cat = custom_categories_head;
+    while (cat) {
+        if (cat->bitmask == bitmask) {
+            return cat->name;
+        }
+        cat = cat->next;
+    }
+    
+    return "unknown";
+}
+
+// Free all custom categories
+void freeCustomCategories(void) {
+    CustomCategory *current = custom_categories_head;
+    while (current) {
+        CustomCategory *next = current->next;
+        ValkeyModule_Free(current->name);
+        ValkeyModule_Free(current);
+        current = next;
+    }
+    custom_categories_head = NULL;
+    next_category_bit = CATEGORY_USER_DEFINED_START;
+}
+
+// Add or update a user-defined command
+int addOrUpdateUserCommand(const char *cmd_name, int firstkey, int lastkey, 
+                           int keystep, uint32_t filter_action, uint32_t custom_category) {
+    if (!cmd_name || strlen(cmd_name) == 0 || strlen(cmd_name) > 32) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    size_t cmd_len = strlen(cmd_name);
+    char *normalized_name = ValkeyModule_Alloc(cmd_len + 1);
+    if (!normalized_name) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    for (size_t i = 0; i < cmd_len; i++) {
+        normalized_name[i] = tolower((unsigned char)cmd_name[i]);
+    }
+    normalized_name[cmd_len] = '\0';
+    
+    // Is this already a user command, so update
+    for (int i = 0; i < user_command_count; i++) {
+        if (user_commands[i] && strcasecmp(user_commands[i]->name, normalized_name) == 0) {
+            // Update existing 
+            user_commands[i]->firstkey = firstkey;
+            user_commands[i]->lastkey = lastkey;
+            user_commands[i]->keystep = keystep;
+            user_commands[i]->filter_action = filter_action;
+            user_commands[i]->custom_category = custom_category;
+            
+            // Update hash table entry - MUST VERIFY NAME MATCHES
+            unsigned long hash = hash_commands(normalized_name, cmd_len) % COMMAND_TABLE_SIZE;
+            size_t index = hash;
+            size_t start_index = index;
+            int found = 0;
+            
+            do {
+                if (command_info_table[index].name != NULL) {
+                    // Verify this is actually our command
+                    if (strcasecmp(command_info_table[index].name, normalized_name) == 0) {
+                        // Found the correct entry - update it
+                        command_info_table[index].info->firstkey = firstkey;
+                        command_info_table[index].info->lastkey = lastkey;
+                        command_info_table[index].info->keystep = keystep;
+                        command_info_table[index].info->filter_action = filter_action;
+                        command_info_table[index].info->custom_category = custom_category;
+                        found = 1;
+                        break;
+                    }
+                }
+                index = (index + 1) % COMMAND_TABLE_SIZE;
+            } while (index != start_index);
+            
+            // If we didn't find it in hash table, that's an error (should never happen)
+            if (!found) {
+                ValkeyModule_Log(NULL, "warning", 
+                    "Audit: User command '%s' exists in user_commands but not in hash table", 
+                    cmd_name);
+                ValkeyModule_Free(normalized_name);
+                return VALKEYMODULE_ERR;
+            }
+            
+            ValkeyModule_Free(normalized_name);
+            return VALKEYMODULE_OK;
+        }
+    }
+    
+    // Is this a static command we're trying to override? 
+    for (int i = 0; theCommands[i].name != NULL; i++) {
+        if (strcasecmp(theCommands[i].name, normalized_name) == 0) {
+            // This is a static command - find and update it in hash table
+            unsigned long hash = hash_commands(normalized_name, cmd_len) % COMMAND_TABLE_SIZE;
+            size_t index = hash;
+            size_t start_index = index;
+            int found = 0;
+            
+            do {
+                if (command_info_table[index].name != NULL) {
+                    // ✅ Verify this is our command
+                    if (strcasecmp(command_info_table[index].name, normalized_name) == 0) {
+                        // Override the static command's filter settings
+                        command_info_table[index].info->filter_action = filter_action;
+                        command_info_table[index].info->custom_category = custom_category;
+                        command_info_table[index].info->firstkey = firstkey;
+                        command_info_table[index].info->lastkey = lastkey;
+                        command_info_table[index].info->keystep = keystep;
+                        found = 1;
+                        break;
+                    }
+                }
+                index = (index + 1) % COMMAND_TABLE_SIZE;
+            } while (index != start_index);
+            
+            if (!found) {
+                ValkeyModule_Log(NULL, "warning",
+                    "Audit: Static command '%s' not found in hash table", cmd_name);
+                ValkeyModule_Free(normalized_name);
+                return VALKEYMODULE_ERR;
+            }
+            
+            ValkeyModule_Free(normalized_name);
+            return VALKEYMODULE_OK;
+        }
+    }
+    
+    // Add new user command
+    if (user_command_count >= MAX_USER_COMMANDS) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Find empty slot in hash table
+    unsigned long hash = hash_commands(normalized_name, cmd_len) % COMMAND_TABLE_SIZE;
+    size_t index = hash;
+    size_t start_index = index;
+    
+    while (command_info_table[index].name != NULL) {
+        index = (index + 1) % COMMAND_TABLE_SIZE;
+        if (index == start_index) {
+            ValkeyModule_Free(normalized_name);
+            return VALKEYMODULE_ERR;  // Table full
+        }
+    }
+    
+    // Create user command record
+    CommandDefinition *user_cmd = ValkeyModule_Alloc(sizeof(CommandDefinition));
+    if (!user_cmd) return VALKEYMODULE_ERR;
+    
+    user_cmd->name = ValkeyModule_Strdup(normalized_name);
+    if (!user_cmd->name) {
+        ValkeyModule_Free(user_cmd);
+        ValkeyModule_Free(normalized_name);
+        return VALKEYMODULE_ERR;
+    }
+    
+    user_cmd->firstkey = firstkey;
+    user_cmd->lastkey = lastkey;
+    user_cmd->keystep = keystep;
+    user_cmd->filter_action = filter_action;
+    user_cmd->custom_category = custom_category;
+    user_cmd->flags = 0;
+    user_cmd->hash_table_index = index;
+    
+    user_commands[user_command_count++] = user_cmd;
+    
+    // Create hash table entry
+    AuditModuleCommandInfo *info = ValkeyModule_Alloc(sizeof(AuditModuleCommandInfo));
+    if (!info) {
+        user_command_count--;
+        ValkeyModule_Free(user_cmd->name);
+        ValkeyModule_Free(user_cmd);
+        ValkeyModule_Free(normalized_name);
+        return VALKEYMODULE_ERR;
+    }
+    
+    info->firstkey = firstkey;
+    info->lastkey = lastkey;
+    info->keystep = keystep;
+    info->flags = 0;
+    info->filter_action = filter_action;
+    info->custom_category = custom_category;
+    
+    // Store in hash table with name for verification
+    command_info_table[index].name = user_cmd->name;  // Point to the same allocated string
+    command_info_table[index].info = info;
+    
+    ValkeyModule_Free(normalized_name);
+    return VALKEYMODULE_OK;
+}
+
+// Free user commands
+void freeUserCommands(void) {
+    // Clear hash table entries for all user commands
+    for (int i = 0; i < user_command_count; i++) {
+        if (user_commands[i]) {
+            size_t idx = user_commands[i]->hash_table_index;  // ✅ Works now
+            
+            // Verify this is actually pointing to our user command
+            if (idx < COMMAND_TABLE_SIZE && 
+                command_info_table[idx].name != NULL &&
+                command_info_table[idx].name == user_commands[i]->name) {
+                
+                // Free the info structure
+                if (command_info_table[idx].info) {
+                    ValkeyModule_Free(command_info_table[idx].info);
+                    command_info_table[idx].info = NULL;
+                }
+                
+                // Clear the hash table entry
+                command_info_table[idx].name = NULL;
+            }
+            
+            // Free the user command structure
+            if (user_commands[i]->name) {
+                ValkeyModule_Free(user_commands[i]->name);
+                user_commands[i]->name = NULL;
+            }
+            ValkeyModule_Free(user_commands[i]);
+            user_commands[i] = NULL;
+        }
+    }
+    
+    // Reset the count
+    user_command_count = 0;
+    
+    if (loglevel_debug) {
+        printf("Audit: Cleared all user commands and hash table entries\n");
+    }
+}
+
+
 /////  Module config  /////
 // Protocol
 ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
@@ -1950,11 +2450,11 @@ ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
     
     // Determine protocol string based on the config struct
     switch(config.protocol) {
-        case PROTOCOL_FILE:
+        case AUDIT_PROTOCOL_FILE:
             protocol_str = "file";
             param_str = config.file_path ? config.file_path : "";
             break;
-        case PROTOCOL_SYSLOG:
+        case AUDIT_PROTOCOL_SYSLOG:
             protocol_str = "syslog";
             // Convert facility number to string
             switch(config.syslog_facility) {
@@ -1971,7 +2471,7 @@ ValkeyModuleString *getAuditProtocol(const char *name, void *privdata) {
                 default: param_str = "unknown"; break;
             }
             break;
-        case PROTOCOL_TCP:
+        case AUDIT_PROTOCOL_TCP:
             protocol_str = "tcp";
             // Format TCP connection as "host:port"
             if (config.tcp_host && config.tcp_port > 0) {
@@ -2029,14 +2529,14 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         const char *filepath = input + 5;
         
         // Close existing connections
-        if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
+        if (config.protocol == AUDIT_PROTOCOL_FILE && config.file_fd != -1) {
             close(config.file_fd);
             config.file_fd = -1;
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_DISCONNECTED);
-        } else if (config.protocol == PROTOCOL_SYSLOG) {
+        } else if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {
             closelog();
             audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_DISCONNECTED);
-        } else if (config.protocol == PROTOCOL_TCP && config.tcp_socket != -1) {
+        } else if (config.protocol == AUDIT_PROTOCOL_TCP && config.tcp_socket != -1) {
             close(config.tcp_socket);
             config.tcp_socket = -1;
             audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
@@ -2062,7 +2562,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         }
         
         // Update config
-        config.protocol = PROTOCOL_FILE;
+        config.protocol = AUDIT_PROTOCOL_FILE;
         
         // Open the file
         config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
@@ -2098,14 +2598,14 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         }
         
         // Close existing connections
-        if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
+        if (config.protocol == AUDIT_PROTOCOL_FILE && config.file_fd != -1) {
             close(config.file_fd);
             config.file_fd = -1;
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_DISCONNECTED);
-        } else if (config.protocol == PROTOCOL_SYSLOG) {
+        } else if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {
             closelog();
             audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_DISCONNECTED);
-        } else if (config.protocol == PROTOCOL_TCP && config.tcp_socket != -1) {
+        } else if (config.protocol == AUDIT_PROTOCOL_TCP && config.tcp_socket != -1) {
             close(config.tcp_socket);
             config.tcp_socket = -1;
             audit_metrics_set_status(AUDIT_PROTOCOL_TCP, AUDIT_STATUS_DISCONNECTED);
@@ -2124,7 +2624,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         }
         
         // Update config
-        config.protocol = PROTOCOL_SYSLOG;
+        config.protocol = AUDIT_PROTOCOL_SYSLOG;
         config.syslog_facility = facility;
         
         // Initialize syslog
@@ -2179,12 +2679,12 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         ValkeyModule_Log(NULL, "notice", "Audit: TCP parsed: host='%s', port=%d", host, port);
         
         // Close existing connections
-        if (config.protocol == PROTOCOL_FILE && config.file_fd != -1) {
+        if (config.protocol == AUDIT_PROTOCOL_FILE && config.file_fd != -1) {
             close(config.file_fd);
             config.file_fd = -1;
-        } else if (config.protocol == PROTOCOL_SYSLOG) {
+        } else if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {
             closelog();
-        } else if (config.protocol == PROTOCOL_TCP && config.tcp_socket != -1) {
+        } else if (config.protocol == AUDIT_PROTOCOL_TCP && config.tcp_socket != -1) {
             close(config.tcp_socket);
             config.tcp_socket = -1;
         }
@@ -2200,7 +2700,7 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         }
         
         // Update config
-        config.protocol = PROTOCOL_TCP;
+        config.protocol = AUDIT_PROTOCOL_TCP;
         config.tcp_host = host;
         config.tcp_port = port;
         config.tcp_socket = -1; // Will be connected on first use
@@ -2274,18 +2774,21 @@ int setAuditFormat(const char *name, ValkeyModuleString *new_val, void *privdata
 ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
-    char event_str[256] = "";
+    char event_str[512] = "";  // Increased size for custom categories
     int pos = 0;
     
     if (config.event_mask == 0) {
         strcpy(event_str, "none");
     } else {
-        // Check for all events (more maintainable)
-        const int all_events = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
-        if (config.event_mask == all_events) {
+        // Check for all events (built-in only, not custom)
+        const int all_builtin_events = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
+        
+        // Check if only built-in events are set and they're all set
+        uint32_t custom_bits = config.event_mask & ~all_builtin_events;
+        if (custom_bits == 0 && (config.event_mask & all_builtin_events) == all_builtin_events) {
             strcpy(event_str, "all");
         } else {
-            // Build string with position tracking
+            // Build string with built-in events
             if (config.event_mask & EVENT_CONNECTIONS) 
                 pos += snprintf(event_str + pos, sizeof(event_str) - pos, "connections,");
         
@@ -2301,8 +2804,17 @@ ValkeyModuleString *getAuditEvents(const char *name, void *privdata) {
             if (config.event_mask & EVENT_OTHER) 
                 pos += snprintf(event_str + pos, sizeof(event_str) - pos, "other,");
 
+            // Add custom categories
+            CustomCategory *cat = custom_categories_head;
+            while (cat && pos < sizeof(event_str) - 1) {
+                if (config.event_mask & cat->bitmask) { 
+                    pos += snprintf(event_str + pos, sizeof(event_str) - pos, "%s,", cat->name);
+                }
+                cat = cat->next;
+            }
+
             // Remove trailing comma
-            if (pos > 0) {
+            if (pos > 0 && event_str[pos - 1] == ',') {
                 event_str[pos - 1] = '\0';
             }
         }
@@ -2328,9 +2840,10 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     
     // Process special keywords "all" or "none"
     if (strcasecmp(events_copy, "all") == 0) {
+        // "all" sets all built-in events, but NOT custom categories
         config.event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER;
         if (loglevel_debug) {
-            printf("Audit: events set to all\n");
+            printf("Audit: events set to all (built-in events only)\n");
         }
         ValkeyModule_Free(events_copy);
         return VALKEYMODULE_OK;
@@ -2344,8 +2857,9 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     }
     
     // Otherwise, process individual event types separated by commas
-    int new_mask = 0;
-    char event_str[256] = "";
+    uint32_t new_mask = 0;  // ✅ Changed from int to uint32_t to match config.event_mask
+    char event_str[512] = "";
+    int event_str_pos = 0;
     char *token, *saveptr;
     
     token = strtok_r(events_copy, ",", &saveptr);
@@ -2355,26 +2869,61 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
         char *end = token + strlen(token) - 1;
         while (end > token && *end == ' ') *end-- = '\0';
         
+        // Check built-in event types
+        int matched = 0;
+        
         if (strcasecmp(token, "connections") == 0) {
             new_mask |= EVENT_CONNECTIONS;
-            snprintf(event_str, sizeof(event_str), "connections,");
+            event_str_pos += snprintf(event_str + event_str_pos, 
+                                     sizeof(event_str) - event_str_pos, 
+                                     "connections,");
+            matched = 1;
         } else if (strcasecmp(token, "auth") == 0) {
             new_mask |= EVENT_AUTH;
-            snprintf(event_str, sizeof(event_str), "auth,");
+            event_str_pos += snprintf(event_str + event_str_pos, 
+                                     sizeof(event_str) - event_str_pos, 
+                                     "auth,");
+            matched = 1;
         } else if (strcasecmp(token, "config") == 0) {
             new_mask |= EVENT_CONFIG;
-            snprintf(event_str, sizeof(event_str), "config,");
+            event_str_pos += snprintf(event_str + event_str_pos, 
+                                     sizeof(event_str) - event_str_pos, 
+                                     "config,");
+            matched = 1;
         } else if (strcasecmp(token, "keys") == 0) {
             new_mask |= EVENT_KEYS;
-            snprintf(event_str, sizeof(event_str), "keys,");
+            event_str_pos += snprintf(event_str + event_str_pos, 
+                                     sizeof(event_str) - event_str_pos, 
+                                     "keys,");
+            matched = 1;
         } else if (strcasecmp(token, "other") == 0) {
             new_mask |= EVENT_OTHER;
-            snprintf(event_str, sizeof(event_str), "other,");    
+            event_str_pos += snprintf(event_str + event_str_pos, 
+                                     sizeof(event_str) - event_str_pos, 
+                                     "other,");
+            matched = 1;
         } else {
+            // Not a built-in event, check custom categories
+            CustomCategory *cat = custom_categories_head;
+            while (cat) {
+                if (strcasecmp(cat->name, token) == 0) {
+                    new_mask |= cat->bitmask;  
+                    event_str_pos += snprintf(event_str + event_str_pos, 
+                                             sizeof(event_str) - event_str_pos, 
+                                             "%s,", cat->name);
+                    matched = 1;
+                    break;
+                }
+                cat = cat->next;
+            }
+        }
+        
+        if (!matched) {
             ValkeyModule_Free(events_copy);
-            char error_msg[100];
+            char error_msg[256];
             snprintf(error_msg, sizeof(error_msg), 
-                     "ERR Unknown event type '%s'. Use 'connections', 'auth', 'config', or 'keys'", token);
+                     "ERR Unknown event type '%s'. Valid types: connections, auth, config, keys, other, or custom category names", 
+                     token);
             *err = ValkeyModule_CreateString(NULL, error_msg, strlen(error_msg));
             return VALKEYMODULE_ERR;
         }
@@ -2383,16 +2932,14 @@ int setAuditEvents(const char *name, ValkeyModuleString *new_val, void *privdata
     }
     
     // Remove trailing comma
-    if (strlen(event_str) > 0) {
-        event_str[strlen(event_str) - 1] = '\0';
+    if (event_str_pos > 0 && event_str[event_str_pos - 1] == ',') {
+        event_str[event_str_pos - 1] = '\0';
     }
     
     config.event_mask = new_mask;
     
-    char details[512];
-    snprintf(details, sizeof(details), "events=%s", event_str);
     if (loglevel_debug) {
-        printf("Audit: %s\n", details);
+        printf("Audit: events=%s\n", event_str);
     }
     
     ValkeyModule_Free(events_copy);
@@ -2834,6 +3381,334 @@ int setAuthResultCheckDelay(const char *name, long long val, void *privdata, Val
     return VALKEYMODULE_OK;
 }
 
+// ===== audit.exclude_commands =====
+ValkeyModuleString *getAuditExcludeCommands(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    char buffer[4096] = "";
+    size_t pos = 0;
+    int first = 1;
+    
+    // Add user-defined excluded commands
+    for (int i = 0; i < user_command_count; i++) {
+        if (user_commands[i] && user_commands[i]->filter_action == FILTER_EXCLUDE) {
+            if (!first) {
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos, ",");
+            }
+            pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s", user_commands[i]->name);
+            first = 0;
+        }
+    }
+    
+    return ValkeyModule_CreateString(NULL, buffer, strlen(buffer));
+}
+
+int setAuditExcludeCommands(const char *name, ValkeyModuleString *new_val, 
+                            void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    size_t len;
+    const char *commands_csv = ValkeyModule_StringPtrLen(new_val, &len);
+    
+    // Clear all existing exclusions first
+    freeUserCommands();
+    
+    if (len == 0 || strcasecmp(commands_csv, "none") == 0) {
+        // Just clearing - we're done
+        if (loglevel_debug) {
+            printf("Audit: exclude_commands cleared\n");
+        }
+        return VALKEYMODULE_OK;
+    }
+    
+    // Parse comma-separated list
+    char *copy = ValkeyModule_Alloc(len + 1);
+    if (!copy) {
+        *err = ValkeyModule_CreateString(NULL, "ERR: Memory allocation failed", -1);
+        return VALKEYMODULE_ERR;
+    }
+    memcpy(copy, commands_csv, len);
+    copy[len] = '\0';
+    
+    char *saveptr;
+    char *token = strtok_r(copy, ",", &saveptr);
+    
+    while (token) {
+        // Trim whitespace
+        while (*token == ' ' || *token == '\t') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t')) *end-- = '\0';
+        
+        if (strlen(token) > 0) {
+            // Validate command name
+            int valid = 1;
+            for (const char *p = token; *p; p++) {
+                if (!isalnum(*p) && *p != '-' && *p != '_' && *p != '*') {
+                    valid = 0;
+                    break;
+                }
+            }
+            
+            if (!valid) {
+                char error_msg[128];
+                snprintf(error_msg, sizeof(error_msg), 
+                         "ERR: Invalid command name '%s'", token);
+                *err = ValkeyModule_CreateString(NULL, error_msg, -1);
+                ValkeyModule_Free(copy);
+                // Rollback: clear what we added
+                freeUserCommands();
+                return VALKEYMODULE_ERR;
+            }
+            
+            // Add to hash table (use 0,0,0 for key positions since we're excluding)
+            if (addOrUpdateUserCommand(token, 0, 0, 0, FILTER_EXCLUDE, 0) != VALKEYMODULE_OK) {
+                *err = ValkeyModule_CreateString(NULL, 
+                    "ERR: Failed to add command (table may be full)", -1);
+                ValkeyModule_Free(copy);
+                // Rollback: clear what we added
+                freeUserCommands();
+                return VALKEYMODULE_ERR;
+            }
+        }
+        
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    
+    ValkeyModule_Free(copy);
+    
+    if (loglevel_debug) {
+        printf("Audit: exclude_commands set to %s\n", commands_csv);
+    }
+    
+    return VALKEYMODULE_OK;
+}
+// ===== audit.prefix_filter =====
+ValkeyModuleString *getAuditPrefixFilter(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    char buffer[4096] = "";
+    size_t pos = 0;
+    int first = 1;
+    
+    // Iterate through all prefix lengths
+    for (int len = 1; len <= MAX_PREFIX_LENGTH; len++) {
+        PrefixFilter *filter = prefix_filters_by_length[len];
+        while (filter) {
+            if (!first) {
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos, ",");
+            }
+            
+            // Add action prefix
+            if (filter->filter_action == FILTER_EXCLUDE) {
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos, "!");
+            }
+            
+            pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s*", filter->prefix);
+            first = 0;
+            
+            filter = filter->next;
+        }
+    }
+    
+    return ValkeyModule_CreateString(NULL, buffer, strlen(buffer));
+}
+
+int setAuditPrefixFilter(const char *name, ValkeyModuleString *new_val, 
+                         void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    size_t len;
+    const char *prefixes_csv = ValkeyModule_StringPtrLen(new_val, &len);
+    
+    // Clear existing prefix filters
+    freePrefixFilters();
+    
+    if (len == 0 || strcasecmp(prefixes_csv, "none") == 0) {
+        return VALKEYMODULE_OK;
+    }
+    
+    // Parse comma-separated list
+    char *copy = ValkeyModule_Alloc(len + 1);
+    if (!copy) {
+        *err = ValkeyModule_CreateString(NULL, "ERR: Memory allocation failed", -1);
+        return VALKEYMODULE_ERR;
+    }
+    memcpy(copy, prefixes_csv, len);
+    copy[len] = '\0';
+    
+    char *saveptr;
+    char *token = strtok_r(copy, ",", &saveptr);
+    
+    while (token) {
+        // Trim whitespace
+        while (*token == ' ' || *token == '\t') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t')) *end-- = '\0';
+        
+        if (strlen(token) > 0) {
+            uint32_t filter_action = FILTER_AUDIT;
+            
+            // Check for exclusion prefix (!)
+            if (token[0] == '!') {
+                filter_action = FILTER_EXCLUDE;
+                token++;  // Skip the '!'
+            }
+            
+            // Validate prefix
+            if (strlen(token) == 0 || strlen(token) > MAX_PREFIX_LENGTH) {
+                char error_msg[128];
+                snprintf(error_msg, sizeof(error_msg), 
+                         "ERR: Invalid prefix length '%s'", token);
+                *err = ValkeyModule_CreateString(NULL, error_msg, -1);
+                ValkeyModule_Free(copy);
+                return VALKEYMODULE_ERR;
+            }
+            
+            if (addPrefixFilter(token, filter_action, 0) != VALKEYMODULE_OK) {
+                *err = ValkeyModule_CreateString(NULL, 
+                    "ERR: Failed to add prefix filter", -1);
+                ValkeyModule_Free(copy);
+                return VALKEYMODULE_ERR;
+            }
+        }
+        
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    
+    ValkeyModule_Free(copy);
+    
+    if (loglevel_debug) {
+        printf("Audit: prefix_filter set to %s\n", prefixes_csv);
+    }
+    
+    return VALKEYMODULE_OK;
+}
+
+// ===== audit.custom_category =====
+ValkeyModuleString *getAuditCustomCategory(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    // Format: "category1:cmd1,cmd2;category2:cmd3,cmd4"
+    char buffer[8192] = "";
+    size_t pos = 0;
+    
+    CustomCategory *cat = custom_categories_head;
+    int first_cat = 1;
+    
+    while (cat) {
+        // Find commands in this category
+        int first_cmd = 1;
+        
+        for (int i = 0; i < user_command_count; i++) {
+            if (user_commands[i] && (user_commands[i]->custom_category & cat->bitmask)) {
+                if (first_cmd) {
+                    if (!first_cat) {
+                        pos += snprintf(buffer + pos, sizeof(buffer) - pos, ";");
+                    }
+                    pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s:", cat->name);
+                    first_cat = 0;
+                    first_cmd = 0;
+                } else {
+                    pos += snprintf(buffer + pos, sizeof(buffer) - pos, ",");
+                }
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s", user_commands[i]->name);
+            }
+        }
+        
+        cat = cat->next;
+    }
+    
+    return ValkeyModule_CreateString(NULL, buffer, strlen(buffer));
+}
+
+int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val, 
+                           void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    size_t len;
+    const char *category_spec = ValkeyModule_StringPtrLen(new_val, &len);
+    
+    if (len == 0 || strcasecmp(category_spec, "none") == 0) {
+        // Clear custom categories
+        freeCustomCategories();
+        return VALKEYMODULE_OK;
+    }
+    
+    // Parse format: "category_name:command1,command2,command3"
+    char *copy = ValkeyModule_Alloc(len + 1);
+    if (!copy) {
+        *err = ValkeyModule_CreateString(NULL, "ERR: Memory allocation failed", -1);
+        return VALKEYMODULE_ERR;
+    }
+    memcpy(copy, category_spec, len);
+    copy[len] = '\0';
+    
+    // Find the colon separator
+    char *colon = strchr(copy, ':');
+    if (!colon) {
+        *err = ValkeyModule_CreateString(NULL, 
+            "ERR: Format must be 'category_name:command1,command2'", -1);
+        ValkeyModule_Free(copy);
+        return VALKEYMODULE_ERR;
+    }
+    
+    *colon = '\0';  // Split into category name and command list
+    char *category_name = copy;
+    char *commands = colon + 1;
+    
+    // Trim category name
+    while (*category_name == ' ') category_name++;
+    char *end = category_name + strlen(category_name) - 1;
+    while (end > category_name && *end == ' ') *end-- = '\0';
+    
+    // Get or create category
+    uint32_t category_bit = getOrCreateCategory(category_name);
+    if (category_bit == 0) {
+        *err = ValkeyModule_CreateString(NULL, 
+            "ERR: Failed to create category (too many categories?)", -1);
+        ValkeyModule_Free(copy);
+        return VALKEYMODULE_ERR;
+    }
+    
+    // Parse command list
+    char *saveptr;
+    char *token = strtok_r(commands, ",", &saveptr);
+    
+    while (token) {
+        // Trim whitespace
+        while (*token == ' ' || *token == '\t') token++;
+        end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t')) *end-- = '\0';
+        
+        if (strlen(token) > 0) {
+            // Add or update command with this category
+            if (addOrUpdateUserCommand(token, 0, 0, 0, FILTER_AUDIT, category_bit) != VALKEYMODULE_OK) {
+                *err = ValkeyModule_CreateString(NULL, 
+                    "ERR: Failed to add command to category", -1);
+                ValkeyModule_Free(copy);
+                return VALKEYMODULE_ERR;
+            }
+        }
+        
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    
+    ValkeyModule_Free(copy);
+    
+    if (loglevel_debug) {
+        printf("Audit: custom_category '%s' set with %d commands\n", 
+               category_name, user_command_count);
+    }
+    
+    return VALKEYMODULE_OK;
+}
+
 /////  Callback functions  /////
 // Client state change callback, used for connection auditing
 void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
@@ -2998,8 +3873,8 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     if (cmd_arg == NULL) return;
     
     const char *cmd_str = ValkeyModule_StringPtrLen(cmd_arg, &cmd_len);
-    
-    // Get client info once and cache
+
+    // Get client info
     unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
     ClientUsernameEntry *entry = getClientEntry(client);
     
@@ -3016,77 +3891,81 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         client_port = entry->client_port;
     }
 
+    // Get command info and category
+    uint32_t effective_category = 0;
+    const char *category_str = "OTHER";
+    AuditModuleCommandInfo *cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
+    audit_filter_stats.user_command_lookups++;
+
+    if (cmd_info != NULL) {
+        //DBG fprintf(stderr, "AUDIT DEBUG | Command: %s, Category Value: %u\n", cmd_str, cmd_info->custom_category);
+        effective_category = cmd_info->custom_category;
+
+        if (effective_category != 0 && effective_category >= CATEGORY_USER_DEFINED_START) {
+            audit_filter_stats.custom_category_matches++;
+        }
+    }   
+
+    // Early exit if client is excluded
+    // Optimized for: client_no_audit=true, is_config_cmd=false being most common
     if (client_no_audit) {
+        // Fast path: not a config command (most common)
+        if (effective_category != EVENT_CONFIG) {
+            audit_metrics_inc_exclusion();
+            return;  // Skip audit
+        }
+        // Slower path: is a config command, check if we must audit it
         if (!config.always_audit_config) {
             audit_metrics_inc_exclusion();
-            return;  // no need to check command type
+            return;  // Skip audit
         }
-    
-        // Only check command type when always_audit_config is true
-        int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
-        if (!is_config_cmd) {
-            audit_metrics_inc_exclusion();
-            return;  // Not CONFIG, so exit
-        }
-    }
-        
-    // Fast check for audit module commands to avoid recursion
-    // Use length check first for early exit
-    if (cmd_len >= 5 && strncasecmp(cmd_str, "audit", 5) == 0) {
-        return;
-    }
-    
-    // Pre-compute command type flags using single pass through command
-    int is_config_cmd = (cmd_len == 6 && strcasecmp(cmd_str, "config") == 0);
-    int is_auth_cmd = (cmd_len == 4 && strcasecmp(cmd_str, "auth") == 0);
-    
-    if (client_no_audit && !(is_config_cmd && config.always_audit_config)) {
-        audit_metrics_inc_exclusion();
-        return;
     }
 
-    // Determine command category and early exit if not auditable
-    int category_match = 0;
-    int is_key_cmd = 0;
-    int is_other_cmd = 0;
-    const char *category_str;
-    AuditModuleCommandInfo *cmd_info = NULL; // Only fetch if needed
-    
-    if (is_config_cmd) {
-        if (config.event_mask & EVENT_CONFIG) {
-            category_match = 1;
-            category_str = "CONFIG";
-        }
-    } else if (is_auth_cmd) {
-        if (config.event_mask & EVENT_AUTH) {
-            category_match = 1;
-            category_str = "AUTH";
-        }
-    } else {
-        // Only get command info if we might need it
-        if ((config.event_mask & EVENT_KEYS) || (config.event_mask & EVENT_OTHER)) {
-            cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
-            
-            if (cmd_info != NULL && 
-                (cmd_info->firstkey != 0 || cmd_info->lastkey != 0) && 
-                (config.event_mask & EVENT_KEYS)) {
-                is_key_cmd = 1;
-                category_match = 1;
-                category_str = "KEY_OP";
-            } else if (!is_key_cmd && (config.event_mask & EVENT_OTHER)) {
-                category_match = 1;
-                is_other_cmd = 1;
-                category_str = "OTHER";
-            }
+    // Fast check for audit module commands to avoid recursion
+    if (cmd_len >= 5) {
+        unsigned char c = cmd_str[0] | 0x20;
+        if (c == 'a' &&
+            ((cmd_str[1] | 0x20) == 'u') &
+            ((cmd_str[2] | 0x20) == 'd') &
+            ((cmd_str[3] | 0x20) == 'i') &
+            ((cmd_str[4] | 0x20) == 't')) {
+            return; // Skip audit
         }
     }
     
-    // Early exit if no category matches
-    if (!category_match) {
+    // Check prefix filters 
+    uint32_t prefix_category = 0;
+    int prefix_result = checkPrefixFilters(cmd_str, cmd_len, &prefix_category);
+    if (prefix_result == FILTER_EXCLUDE) {
+        audit_metrics_inc_exclusion();
+        return;
+    }
+      
+    // Determine command category and early exit if not auditable
+    if (cmd_info != NULL) {
+        //DBG fprintf(stderr, "AUDIT DEBUG | FilterAction: %d \n", cmd_info->filter_action);
+        // Check if command is explicitly excluded
+        if (cmd_info->filter_action == FILTER_EXCLUDE) {
+            audit_metrics_inc_exclusion();
+            return;
+        }
+    } else if (prefix_category != 0) {
+        // Use category from prefix filter if hash table had no match
+        effective_category = prefix_category;
+    } else {
+        // Unknown command, default to OTHER
+        effective_category = EVENT_OTHER;
+    }
+    
+    // Check if this category is enabled in event mask
+    if (!(config.event_mask & effective_category)) {
         audit_metrics_inc_exclusion();
         return;
     }
     
+    // Get category name for logging 
+    category_str = getCategoryName(effective_category);
+
     char details[2048];
     char *details_ptr = details;
     size_t remaining = sizeof(details) - 1; // Reserve space for null terminator
@@ -3129,7 +4008,8 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     }
     
     // Add command-specific details
-    if (is_config_cmd && remaining > 0) {
+    if (effective_category == EVENT_CONFIG && remaining > 0) {
+        // CONFIG command - add subcommand and parameters
         const ValkeyModuleString *subcmd_arg = ValkeyModule_CommandFilterArgGet(filter, 1);
         if (subcmd_arg != NULL) {
             size_t subcmd_len;
@@ -3137,7 +4017,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
             
             APPEND_TO_DETAILS(" subcommand=%s", subcmd_str);
             
-            // Only get parameter for GET/SET - check length first for efficiency
+            // For GET/SET, add parameter - check length first for efficiency
             if (remaining > 0 && subcmd_len == 3 && 
                 (strncasecmp(subcmd_str, "get", 3) == 0 || strncasecmp(subcmd_str, "set", 3) == 0)) {
                 const ValkeyModuleString *param_arg = ValkeyModule_CommandFilterArgGet(filter, 2);
@@ -3148,11 +4028,14 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
                 }
             }
         }
-    } else if (is_auth_cmd && remaining > 0) {
+    } 
+    else if (effective_category == EVENT_AUTH && remaining > 0) {
+        // AUTH command - redact password
         APPEND_LITERAL(" password=<REDACTED>");
-    } else if (is_key_cmd && remaining > 0) {
-        // Add key name if available
-        if (cmd_info && cmd_info->firstkey > 0) {
+    } 
+    else if (effective_category == EVENT_KEYS && cmd_info && remaining > 0) {
+        // KEY command - add key name
+        if (cmd_info->firstkey > 0) {
             const ValkeyModuleString *key_arg = ValkeyModule_CommandFilterArgGet(filter, cmd_info->firstkey);
             if (key_arg != NULL) {
                 size_t key_len;
@@ -3162,8 +4045,8 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         }
         
         // Include payload if enabled and there's space
-        if (!config.disable_payload && remaining > 0 && cmd_info) {
-            int payload_idx = cmd_info->firstkey > 0 ? cmd_info->firstkey + 1 : 1;
+        if (!config.disable_payload && remaining > 0 && cmd_info->firstkey > 0) {
+            int payload_idx = cmd_info->firstkey + 1;
             const ValkeyModuleString *payload_arg = ValkeyModule_CommandFilterArgGet(filter, payload_idx);
             
             if (payload_arg != NULL) {
@@ -3186,8 +4069,9 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
                 }
             }
         }
-    } else if (is_other_cmd && remaining > 0) {
-        // Add first few arguments efficiently
+    } 
+    else if (remaining > 0) {
+        // OTHER command or custom category - add first few arguments
         int argc = ValkeyModule_CommandFilterArgsCount(filter);
         int max_args_to_log = 3;
         
@@ -3212,7 +4096,7 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
             APPEND_TO_DETAILS(" (and %d more args)", argc - max_args_to_log - 1);
         }
     }
-    
+
     #undef APPEND_TO_DETAILS
     #undef APPEND_LITERAL
     
@@ -3289,7 +4173,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
             i++;  // Skip the protocol argument since we processed it
             
             if (strcasecmp(protocol, "file") == 0) {
-                config.protocol = PROTOCOL_FILE;
+                config.protocol = AUDIT_PROTOCOL_FILE;
                 
                 // Check if there's another argument available for filepath
                 if (i < argc-1) {
@@ -3299,7 +4183,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                     ValkeyModule_Log(ctx, "warning", "Missing filepath for file protocol, using default");
                 }
             } else if (strcasecmp(protocol, "syslog") == 0) {
-                config.protocol = PROTOCOL_SYSLOG;
+                config.protocol = AUDIT_PROTOCOL_SYSLOG;
                 
                 // Check if there's another argument available for syslog-facility
                 if (i < argc-1) {
@@ -3322,7 +4206,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                     ValkeyModule_Log(ctx, "warning", "Missing syslog-facility for syslog protocol, using default");
                 }
             } else if (strcasecmp(protocol, "tcp") == 0) {
-                config.protocol = PROTOCOL_TCP;
+                config.protocol = AUDIT_PROTOCOL_TCP;
                 
                 // Check if there's another argument available for tcp host:port
                 if (i < argc-1) {
@@ -3554,6 +4438,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     }
     ValkeyModule_Log(ctx, "notice", "Audit logging system initialized successfully");
 
+    // Initialize new filter systems
+    initPrefixFilters();
+    initCustomCategories();
+
     // Initialize the audit module config with passed arguments
     if (initAuditModule(ctx, argv, argc) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
@@ -3566,10 +4454,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
 
     // Register module configurations
     char default_protocol[256];
-    if (config.protocol == PROTOCOL_FILE) {
+    if (config.protocol == AUDIT_PROTOCOL_FILE) {
         snprintf(default_protocol, sizeof(default_protocol), "file %s", config.file_path);
     }
-    else if (config.protocol == PROTOCOL_SYSLOG) {       
+    else if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {       
         char facility[12];
         if (config.syslog_facility == LOG_LOCAL0) snprintf(facility, sizeof(facility), "local0");
         else if (config.syslog_facility == LOG_LOCAL1) snprintf(facility, sizeof(facility), "local1");
@@ -3586,7 +4474,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         }
         snprintf(default_protocol, sizeof(default_protocol), "syslog %s", facility);
     }
-    else if (config.protocol == PROTOCOL_TCP) {       
+    else if (config.protocol == AUDIT_PROTOCOL_TCP) {       
         snprintf(default_protocol, sizeof(default_protocol), "tcp %s:%d", config.tcp_host, config.tcp_port );
     }
     else {
@@ -3760,6 +4648,7 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
             NULL, NULL) == VALKEYMODULE_ERR) {
     return VALKEYMODULE_ERR;
 }
+
     // Register buffer size configuration
     //if (ValkeyModule_RegisterNumericConfig(ctx, "buffer_size", config.buffer_size,
     //       VALKEYMODULE_CONFIG_DEFAULT,
@@ -3770,13 +4659,36 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     //    return VALKEYMODULE_ERR;
     //}
 
-
     // Load all configurations
     if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-        // Register the AUDITUSERS command separately (keeping it as a top-level command)
+    // audit.exclude_commands
+    if (ValkeyModule_RegisterStringConfig(ctx, "exclude_commands", "", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditExcludeCommands, setAuditExcludeCommands, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // audit.prefix_filter
+    if (ValkeyModule_RegisterStringConfig(ctx, "prefix_filter", "", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditPrefixFilter, setAuditPrefixFilter, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
+    // audit.custom_category
+    if (ValkeyModule_RegisterStringConfig(ctx, "custom_category", "", 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getAuditCustomCategory, setAuditCustomCategory, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    // Register the AUDITUSERS command separately (keeping it as a top-level command)
     if (ValkeyModule_CreateCommand(ctx, "auditusers", 
             AuditUsersCommand,
             "admin", 0, 0, 0) == VALKEYMODULE_ERR) {
@@ -3815,7 +4727,7 @@ int ValkeyModule_OnUnload(ValkeyModuleCtx *ctx) {
     }
     
     // Close syslog if it was in use
-    if (config.protocol == PROTOCOL_SYSLOG) {
+    if (config.protocol == AUDIT_PROTOCOL_SYSLOG) {
         closelog();
     }
     
@@ -3824,7 +4736,11 @@ int ValkeyModule_OnUnload(ValkeyModuleCtx *ctx) {
         ValkeyModule_Free(config.file_path);
         config.file_path = NULL;
     }
-    
+
+    // Free filter systems
+    freePrefixFilters();
+    freeCustomCategories();
+    freeUserCommands();
     ValkeyModule_Log(ctx, "notice", "Audit logging system shut down successfully");
     
     return VALKEYMODULE_OK;

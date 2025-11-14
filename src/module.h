@@ -8,13 +8,6 @@
 
 #define MAX_LOG_SIZE 10000
 #define MAX_BUFFER_SIZE 1024
-#define USERNAME_HASH_SIZE 1024
-#define COMMAND_TABLE_SIZE 150
-
-// Protocol types
-#define PROTOCOL_FILE 0
-#define PROTOCOL_SYSLOG 1
-#define PROTOCOL_TCP 2
 
 // Event categories
 #define EVENT_CONNECTIONS (1<<0)
@@ -22,6 +15,7 @@
 #define EVENT_CONFIG (1<<2)
 #define EVENT_KEYS (1<<3)
 #define EVENT_OTHER (1<<4)
+#define CATEGORY_USER_DEFINED_START (1 << 16) // Custom category bits
 
 // Event format types
 #define FORMAT_TEXT 0
@@ -36,14 +30,15 @@
 #define EVENT_ERROR 4
 #define EVENT_DEBUG 5
 
-
-// Fsync policies
-#define AOF_FSYNC_NO 0       // Don't fsync, just let the OS handle it (highest performance)
-#define AOF_FSYNC_ALWAYS 1   // Fsync after every write (highest durability)
-#define AOF_FSYNC_EVERYSEC 2  // Fsync once per second (good compromise)
+// Filter actions
+#define FILTER_AUDIT     0    // Audit this command
+#define FILTER_EXCLUDE   1    // Exclude from auditing
 
 #define AUDIT_LOG_BUFFER_SIZE (1*1024*1024)   // 1MB buffer
 #define AUDIT_LOG_FLUSH_INTERVAL 1000         // Flush every 1000ms
+
+// User-defined command storage
+#define MAX_USER_COMMANDS 200
 
 // module config structure
 typedef struct AuditConfig {
@@ -58,7 +53,6 @@ typedef struct AuditConfig {
     int syslog_facility;
     int syslog_priority;
     int always_audit_config;
-    int fsync_policy;
     int auth_result_check_delay_ms; // Delay for auth result check in milliseconds
 
     /* TCP-specific settings */
@@ -118,15 +112,41 @@ typedef struct AuditModuleCommandInfo {
     int lastkey;     // Index of last key argument (-1 for unlimited)
     int keystep;     // Step between key arguments
     int flags;       // Command flags
+    uint32_t filter_action;      // FILTER_AUDIT or FILTER_EXCLUDE
+    uint32_t custom_category;    // Optional category bitmask
 } AuditModuleCommandInfo;
+
+typedef struct {
+    const char *name;              // Command name for verification
+    AuditModuleCommandInfo *info;  // The actual command info
+} CommandTableEntry;
 
 // Structure to hold command definitions
 typedef struct {
-    const char *name;
+    char *name;
     int firstkey;
     int lastkey;
     int keystep;
     int flags;
+    uint32_t filter_action;      // FILTER_AUDIT or FILTER_EXCLUDE
+    uint32_t custom_category;    // Optional category bitmask
+    size_t hash_table_index;
 } CommandDefinition;
+
+// Prefix filter structure
+typedef struct PrefixFilter {
+    char *prefix;
+    size_t prefix_len;
+    uint32_t filter_action;      // FILTER_AUDIT or FILTER_EXCLUDE
+    uint32_t custom_category;    // Optional category bitmask
+    struct PrefixFilter *next;
+} PrefixFilter;
+
+// Custom category mapping
+typedef struct CustomCategory {
+    char *name;                  // e.g., "dangerous", "admin"
+    uint32_t bitmask;           // Unique bit for this category
+    struct CustomCategory *next;
+} CustomCategory;
 
 #endif // MODULE_H
