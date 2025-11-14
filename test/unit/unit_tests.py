@@ -71,17 +71,22 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             #f.write(f"loadmodule {cls.module_path} protocol file {cls.log_file}\n")
             f.write(f"loadmodule {cls.module_path}\n")    
             f.write(f"audit.protocol file {cls.log_file}\n")
+            f.write(f"logfile {cls.temp_dir}/vk.log \n")
         
         print(f"written {cls.temp_dir} valkey.conf")
+
+        # Create a stderr log file
+        cls.stderr_log = os.path.join(cls.temp_dir, "valkey_stderr.log")
+        cls.stderr_file = open(cls.stderr_log, 'w')
 
         # Start the server
         cls.server_proc = subprocess.Popen(
             [cls.valkey_server, cls.conf_file],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=cls.stderr_file
         )
         # Give it a moment to start
-        time.sleep(1)
+        time.sleep(10)
         #stdout, stderr = cls.server_proc.communicate()
         #if stdout:
         #    print(f"Server STDOUT:\n{stdout}")
@@ -97,6 +102,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     
     def _read_log_file(self):
         """Read the audit log file contents"""
+        #print(f"Reading log file: {self.log_file}")
         try:
             with open(self.log_file, 'r') as f:
                 return f.readlines()
@@ -184,22 +190,39 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                 # Check text format (simple check)
                 self.assertRegex(log_lines[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]",
                                "Text format should start with timestamp in brackets")
-    
+        
     def test_004_set_events(self):
         """Test enabling/disabling different event categories"""
+        
+        # cli sends docs first, lets see if this changes anything
+        self.redis.execute_command("PING")
+
+        # Before test, verify audit logging works
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.ENABLED", "yes")
+        self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "all")
+        self._clear_log_file()
+        self.redis.execute_command("CONFIG", "GET", "port")
+
+        log_lines = self._read_log_file()
+        assert len(log_lines) > 0, "Audit logging not working"
+
         # Test setting specific events
         self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config")
-        
+        log_lines = self._read_log_file()
+        print(f"Log lines: {len(log_lines)}")
+
         # Clear log file
         self._clear_log_file()
-        
+        time.sleep(1)
         # Generate different types of events
         self.redis.set("key1", "value1")  # Key operation - should NOT be logged
         self.redis.execute_command("CONFIG", "GET", "port")  # Config operation - should be logged
         self.redis.execute_command("INFO", "server")  # Other operation - should NOT be logged
+        time.sleep(1)
         
-        # Check log file
+        print("Checking log file for CONFIG only events")
         log_lines = self._read_log_file()
+        print(f"Log lines: {len(log_lines)}")
         
         # Only CONFIG events should be logged
         self.assertTrue(any("CONFIG" in line for line in log_lines), 
@@ -322,11 +345,12 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     def test_006_get_config(self):
         """Test getting the current configuration"""
         self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_MAXSIZE", "1024")
+        self.redis.execute_command("CONFIG","SET","AUDIT.EVENTS", "all")
 
         config = self.redis.execute_command("CONFIG GET AUDIT.*")
         
         # Check structure - Redis returns flat key-value pairs
-        self.assertEqual(len(config), 32, "Config should have 32 items")
+        self.assertEqual(len(config), 38, "Config should have 38 items")
         
         # Convert flat array to dictionary (every two elements form a key-value pair)
         config_dict = {}

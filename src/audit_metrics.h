@@ -125,8 +125,8 @@ void audit_metrics_reset(void);
 
 int audit_metrics_register_info(ValkeyModuleCtx *ctx);
 
-#define AUDIT_PROTOCOL_FILE    0
-#define AUDIT_PROTOCOL_SYSLOG  1  
-#define AUDIT_PROTOCOL_TCP     2
+void AuditInfoFunc(ValkeyModuleInfoCtx *ctx, int for_crash_report);
+
+int AuditStatsResetCommand(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc);
 
 #endif // AUDIT_METRICS_H
