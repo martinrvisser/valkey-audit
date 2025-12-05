@@ -2594,17 +2594,21 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         
         // Update config
         config.protocol = AUDIT_PROTOCOL_FILE;
-        
+
         // Open the file
         config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
         if (config.file_fd == -1) {
-            *err = ValkeyModule_CreateString(NULL, "ERR Failed to open audit log file", 32);
+            char error_msg[256];
+            snprintf(error_msg, sizeof(error_msg),
+                    "ERR Failed to open audit log file '%s': %s (Check that directory exists)",
+                    config.file_path, strerror(errno));
+            *err = ValkeyModule_CreateString(NULL, error_msg, strlen(error_msg));
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_ERROR);
             return VALKEYMODULE_ERR;
         } else {
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_CONNECTED);
         }
-        
+
         return VALKEYMODULE_OK;
     } 
     else if (len >= 7 && strncasecmp(input, "syslog ", 7) == 0) {
@@ -4553,7 +4557,27 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     // Initialize the audit module config with passed arguments
     if (initAuditModule(ctx, argv, argc) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
-    }  
+    }
+
+    // Open audit file if protocol is FILE and it hasn't been opened yet
+    if (config.protocol == AUDIT_PROTOCOL_FILE && config.file_fd == -1) {
+        config.file_fd = open(config.file_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (config.file_fd == -1) {
+            ValkeyModule_Log(ctx, "warning",
+                           "Failed to open audit log file '%s': %s",
+                           config.file_path, strerror(errno));
+            ValkeyModule_Log(ctx, "warning",
+                           "Check that the directory exists and has correct permissions");
+            ValkeyModule_Log(ctx, "warning",
+                           "Audit logging will be disabled until a valid protocol is configured");
+            // Set protocol to an invalid state or disable auditing
+            config.enabled = 0;
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_ERROR);
+        } else {
+            audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_CONNECTED);
+            ValkeyModule_Log(ctx, "notice", "Audit log file opened successfully: %s", config.file_path);
+        }
+    }
 
     // Initialize hash table for client usernames
     for (int i = 0; i < USERNAME_HASH_SIZE; i++) {
