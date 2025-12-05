@@ -38,7 +38,8 @@ static AuditConfig config = {
     .file_path = "audit.log",
     .syslog_facility = LOG_LOCAL0,
     .syslog_priority = LOG_NOTICE,
-    
+    .always_audit_config = 0,  /* Explicitly initialize to 0 */
+
     /* Initialize fields that require runtime allocation to NULL/default values */
     .buffer = NULL,
     .buffer_size = 16 * 1024 * 1024,  /* 16MB default */
@@ -50,7 +51,8 @@ static AuditConfig config = {
     .tcp_connected = 0,
     .tcp_retry_count = 0,
     .worker_running = 0,
-    .shutdown_flag = 0
+    .shutdown_flag = 0,
+    .ignore_internal_clients = 1
 };
 
 // Forward declarations
@@ -465,6 +467,28 @@ AuditModuleCommandInfo* ValkeyModule_GetCommandInfo(const char *cmd_name, size_t
 
     // Command not found
     return NULL;
+}
+
+// Get the built-in category for a command by looking it up in theCommands array
+// Returns the category bitmask (e.g., EVENT_KEYS, EVENT_CONFIG, EVENT_AUTH, EVENT_OTHER)
+// Returns 0 if command not found
+static uint32_t getBuiltinCategoryForCommand(const char *cmd_str, size_t cmd_len) {
+    if (cmd_str == NULL || cmd_len == 0) {
+        return 0;
+    }
+    
+    // Search through the static command definitions
+    for (int i = 0; theCommands[i].name != NULL; i++) {
+        // Compare command names case-insensitively
+        if (strlen(theCommands[i].name) == cmd_len && 
+            strncasecmp(theCommands[i].name, cmd_str, cmd_len) == 0) {
+            // Return the custom_category field which holds the built-in category
+            return theCommands[i].custom_category;
+        }
+    }
+    
+    // Command not found in built-in commands
+    return 0;
 }
 
 // Helper functions for formatting and writing audit logs
@@ -1349,24 +1373,6 @@ ClientUsernameEntry* getClientEntry(uint64_t client_id) {
     return NULL;
 }
 
-// For backward compatibility if needed
-const char* getClientUsername(uint64_t client_id) {
-    ClientUsernameEntry *entry = getClientEntry(client_id);
-    if (entry != NULL) {
-        return entry->username;
-    }
-    return NULL;
-}
-
-// New helper function to get client IP address
-const char* getClientIPAddress(uint64_t client_id) {
-    ClientUsernameEntry *entry = getClientEntry(client_id);
-    if (entry != NULL && entry->ip_address != NULL) {
-        return entry->ip_address;
-    }
-    return NULL;
-}
-
 // Add or update a client ID to username mapping
 // also set the no_audit flag if the username is to be excluded
 void storeClientInfo(uint64_t client_id, const char *username, const char *ip_address, 
@@ -2147,89 +2153,6 @@ void freePrefixFilters(void) {
     prefix_filter_count = 0;
 }
 
-// Initialize custom categories
-void initCustomCategories(void) {
-    custom_categories_head = NULL;
-    next_category_bit = CATEGORY_USER_DEFINED_START;
-}
-
-// Find or create a custom category
-uint32_t getOrCreateCategory(const char *category_name) {
-    if (!category_name || strlen(category_name) == 0) {
-        return 0;
-    }
-    
-    // Search for existing category
-    CustomCategory *cat = custom_categories_head;
-    while (cat) {
-        if (strcasecmp(cat->name, category_name) == 0) {
-            return cat->bitmask;
-        }
-        cat = cat->next;
-    }
-    
-    // Create new category
-    if (next_category_bit == 0) {
-        // Overflow - too many categories
-        return 0;
-    }
-    
-    cat = ValkeyModule_Alloc(sizeof(CustomCategory));
-    if (!cat) return 0;
-    
-    cat->name = ValkeyModule_Strdup(category_name);
-    if (!cat->name) {
-        ValkeyModule_Free(cat);
-        return 0;
-    }
-    
-    cat->bitmask = next_category_bit;
-    next_category_bit = next_category_bit << 1;  // Next bit pos
-    
-    // Add to list
-    cat->next = custom_categories_head;
-    custom_categories_head = cat;
-    
-    return cat->bitmask;
-}
-
-// Get category name from bitmask (for display)
-const char* getCategoryName(uint32_t bitmask) {
-    if (bitmask < CATEGORY_USER_DEFINED_START) {
-        // Built-in categories
-        if (bitmask & EVENT_CONNECTIONS) return "CONNECTIONS";
-        if (bitmask & EVENT_AUTH) return "AUTH";
-        if (bitmask & EVENT_CONFIG) return "CONFIG";
-        if (bitmask & EVENT_KEYS) return "KEY_OP";
-        if (bitmask & EVENT_OTHER) return "OTHER";
-        return "unknown";
-    }
-    
-    // User-defined categories
-    CustomCategory *cat = custom_categories_head;
-    while (cat) {
-        if (cat->bitmask == bitmask) {
-            return cat->name;
-        }
-        cat = cat->next;
-    }
-    
-    return "unknown";
-}
-
-// Free all custom categories
-void freeCustomCategories(void) {
-    CustomCategory *current = custom_categories_head;
-    while (current) {
-        CustomCategory *next = current->next;
-        ValkeyModule_Free(current->name);
-        ValkeyModule_Free(current);
-        current = next;
-    }
-    custom_categories_head = NULL;
-    next_category_bit = CATEGORY_USER_DEFINED_START;
-}
-
 // Add or update a user-defined command
 int addOrUpdateUserCommand(const char *cmd_name, int firstkey, int lastkey, 
                            int keystep, uint32_t filter_action, uint32_t custom_category) {
@@ -2402,7 +2325,7 @@ void freeUserCommands(void) {
     // Clear hash table entries for all user commands
     for (int i = 0; i < user_command_count; i++) {
         if (user_commands[i]) {
-            size_t idx = user_commands[i]->hash_table_index;  // ✅ Works now
+            size_t idx = user_commands[i]->hash_table_index; 
             
             // Verify this is actually pointing to our user command
             if (idx < COMMAND_TABLE_SIZE && 
@@ -2432,11 +2355,119 @@ void freeUserCommands(void) {
     // Reset the count
     user_command_count = 0;
     
+    // Restore original categories for static commands that may have been overridden
+    for (int i = 0; theCommands[i].name != NULL; i++) {
+        size_t cmd_len = strlen(theCommands[i].name);
+        unsigned long hash = hash_commands(theCommands[i].name, cmd_len) % COMMAND_TABLE_SIZE;
+        size_t index = hash;
+        size_t start_index = index;
+        
+        // Find this command in hash table
+        do {
+            if (command_info_table[index].name != NULL &&
+                strcasecmp(command_info_table[index].name, theCommands[i].name) == 0) {
+                // Restore original values from theCommands array
+                command_info_table[index].info->custom_category = theCommands[i].custom_category;
+                command_info_table[index].info->filter_action = theCommands[i].filter_action;
+                command_info_table[index].info->firstkey = theCommands[i].firstkey;
+                command_info_table[index].info->lastkey = theCommands[i].lastkey;
+                command_info_table[index].info->keystep = theCommands[i].keystep;
+                break;
+            }
+            index = (index + 1) % COMMAND_TABLE_SIZE;
+        } while (index != start_index);
+    }
+    
     if (loglevel_debug) {
-        printf("Audit: Cleared all user commands and hash table entries\n");
+        printf("Audit: Cleared all user commands and restored static command categories\n");
     }
 }
 
+// Initialize custom categories
+void initCustomCategories(void) {
+    custom_categories_head = NULL;
+    next_category_bit = CATEGORY_USER_DEFINED_START;
+}
+
+// Find or create a custom category
+uint32_t getOrCreateCategory(const char *category_name) {
+    if (!category_name || strlen(category_name) == 0) {
+        return 0;
+    }
+    
+    // Search for existing category
+    CustomCategory *cat = custom_categories_head;
+    while (cat) {
+        if (strcasecmp(cat->name, category_name) == 0) {
+            return cat->bitmask;
+        }
+        cat = cat->next;
+    }
+    
+    // Create new category
+    if (next_category_bit == 0) {
+        // Overflow - too many categories
+        return 0;
+    }
+    
+    cat = ValkeyModule_Alloc(sizeof(CustomCategory));
+    if (!cat) return 0;
+    
+    cat->name = ValkeyModule_Strdup(category_name);
+    if (!cat->name) {
+        ValkeyModule_Free(cat);
+        return 0;
+    }
+    
+    cat->bitmask = next_category_bit;
+    next_category_bit = next_category_bit << 1;  // Next bit pos
+    
+    // Add to list
+    cat->next = custom_categories_head;
+    custom_categories_head = cat;
+    
+    return cat->bitmask;
+}
+
+// Get category name from bitmask (for display)
+const char* getCategoryName(uint32_t bitmask) {
+    if (bitmask < CATEGORY_USER_DEFINED_START) {
+        // Built-in categories
+        if (bitmask & EVENT_CONNECTIONS) return "CONNECTIONS";
+        if (bitmask & EVENT_AUTH) return "AUTH";
+        if (bitmask & EVENT_CONFIG) return "CONFIG";
+        if (bitmask & EVENT_KEYS) return "KEY_OP";
+        if (bitmask & EVENT_OTHER) return "OTHER";
+        return "unknown";
+    }
+    
+    // User-defined categories
+    CustomCategory *cat = custom_categories_head;
+    while (cat) {
+        if (cat->bitmask == bitmask) {
+            return cat->name;
+        }
+        cat = cat->next;
+    }
+    
+    return "unknown";
+}
+
+// Free all custom categories
+void freeCustomCategories(void) {
+    CustomCategory *current = custom_categories_head;
+    while (current) {
+        CustomCategory *next = current->next;
+        ValkeyModule_Free(current->name);
+        ValkeyModule_Free(current);
+        current = next;
+    }
+    custom_categories_head = NULL;
+    next_category_bit = CATEGORY_USER_DEFINED_START;
+    
+    // we need to clear the user commands as well
+    freeUserCommands();  
+}
 
 /////  Module config  /////
 // Protocol
@@ -3381,6 +3412,35 @@ int setAuthResultCheckDelay(const char *name, long long val, void *privdata, Val
     return VALKEYMODULE_OK;
 }
 
+// Ignore internal clients setter and getter
+int getIgnoreInternalClients(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    
+    return config.ignore_internal_clients;
+}
+
+int setIgnoreInternalClients(const char *name, int new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);
+
+    config.ignore_internal_clients = new_val;
+    
+    if (config.ignore_internal_clients) {
+        if (loglevel_debug) {
+            printf("Audit: ignore_internal_clients set to yes\n");
+        }
+
+        return VALKEYMODULE_OK;
+    } else {
+        if (loglevel_debug) {
+            printf("Audit: ignore_internal_clients set to no\n");
+        }
+        return VALKEYMODULE_OK;
+    }
+}
+
 // ===== audit.exclude_commands =====
 ValkeyModuleString *getAuditExcludeCommands(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
@@ -3714,17 +3774,18 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
 void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t sub, void *data) {
     VALKEYMODULE_NOT_USED(e);
 
-    if ((config.enabled!=1) || !(config.event_mask & EVENT_CONNECTIONS)) return;
+    // Determine if we should log connection events, but always track clients for command auditing
+    int log_connection = (config.enabled == 1) && (config.event_mask & EVENT_CONNECTIONS);
 
     ValkeyModuleClientInfo *ci = data;
-    const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ? 
+    const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ?
                              "connection" : "disconnection";
-    
+
     // Buffer for the audit message
     char buffer[1024];
     const char *username = "unknown"; // Default value
     char *temp_username = NULL;       // For tracking allocated memory
-    
+
     if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) {
         // Client connected - get and store username
         ValkeyModuleString *user_str = ValkeyModule_GetClientUserNameById(ctx, ci->id);
@@ -3741,14 +3802,14 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
                 ValkeyModule_FreeString(ctx, user_str);
                 return; // Or some other error handling
             }
-            
+
             snprintf(temp_username, user_len + 1, "%s", user_ptr);
             temp_username[user_len] = '\0'; // Null-terminate the copy
             username = temp_username;       // Use our copy for the audit message
 
             // Check if client should be excluded from audit based on username and IP
             int no_audit = isClientExcluded(username, ci->addr);
-            
+
             // Store username and IP in hash table
             storeClientInfo(ci->id, username, ci->addr, ci->port, no_audit, 0);
 
@@ -3785,23 +3846,26 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
         } else {
             username = "unknown"; // Fallback if not found in hash
         }
-        
+
         // Client disconnected - remove from hash table
         removeClientInfo(ci->id);
     }
-    
-    // Format the audit message with username information
-    snprintf(buffer, sizeof(buffer), 
-             "client #%llu %s:%d using username: %s type %s",
-             (unsigned long long)ci->id, 
-             ci->addr, 
-             ci->port, 
-             username,
-             getClientTypeStr(ci)
-            );
-    
-    logAuditEvent("CONNECTION", event_type, buffer, username, ci->addr, ci->port, EVENT_SUCCESS);
-    
+
+    // Only log connection events if enabled and connections are in the event mask
+    if (log_connection) {
+        // Format the audit message with username information
+        snprintf(buffer, sizeof(buffer),
+                 "client #%llu %s:%d using username: %s type %s",
+                 (unsigned long long)ci->id,
+                 ci->addr,
+                 ci->port,
+                 username,
+                 getClientTypeStr(ci)
+                );
+
+        logAuditEvent("CONNECTION", event_type, buffer, username, ci->addr, ci->port, EVENT_SUCCESS);
+    }
+
     // Clean up our temporary memory
     if (temp_username != NULL) {
         ValkeyModule_Free(temp_username);
@@ -3890,12 +3954,23 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         client_no_audit = entry->no_audit;
         client_port = entry->client_port;
     }
+    else {
+        if (config.ignore_internal_clients) {
+            // Internal client - skip audit
+            audit_metrics_inc_exclusion();
+            return;
+        }
+    }
 
     // Get command info and category
     uint32_t effective_category = 0;
     const char *category_str = "OTHER";
     AuditModuleCommandInfo *cmd_info = ValkeyModule_GetCommandInfo(cmd_str, cmd_len);
     audit_filter_stats.user_command_lookups++;
+
+    // Get prefix filters and resolve category BEFORE client exclusion check
+    uint32_t prefix_category = 0;
+    int prefix_result = checkPrefixFilters(cmd_str, cmd_len, &prefix_category);
 
     if (cmd_info != NULL) {
         //DBG fprintf(stderr, "AUDIT DEBUG | Command: %s, Category Value: %u\n", cmd_str, cmd_info->custom_category);
@@ -3904,20 +3979,17 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         if (effective_category != 0 && effective_category >= CATEGORY_USER_DEFINED_START) {
             audit_filter_stats.custom_category_matches++;
         }
-    }   
-
-    // Early exit if client is excluded
-    // Optimized for: client_no_audit=true, is_config_cmd=false being most common
-    if (client_no_audit) {
-        // Fast path: not a config command (most common)
-        if (effective_category != EVENT_CONFIG) {
-            audit_metrics_inc_exclusion();
-            return;  // Skip audit
-        }
-        // Slower path: is a config command, check if we must audit it
-        if (!config.always_audit_config) {
-            audit_metrics_inc_exclusion();
-            return;  // Skip audit
+        // if no custom category fall back to built-in
+        if (effective_category == 0) {
+            effective_category = getBuiltinCategoryForCommand(cmd_str, cmd_len);
+            // Or use prefix_category if available
+            if (effective_category == 0 && prefix_category != 0) {
+                effective_category = prefix_category;
+            }
+            // Final fallback
+            if (effective_category == 0) {
+                effective_category = EVENT_OTHER;
+            }
         }
     }
 
@@ -3933,36 +4005,59 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
         }
     }
     
-    // Check prefix filters 
-    uint32_t prefix_category = 0;
-    int prefix_result = checkPrefixFilters(cmd_str, cmd_len, &prefix_category);
-    if (prefix_result == FILTER_EXCLUDE) {
-        audit_metrics_inc_exclusion();
-        return;
+    
+    // Resolve effective category if cmd_info lookup failed
+    if (cmd_info == NULL) {
+        if (prefix_category != 0) {
+            // Use category from prefix filter if hash table had no match
+            effective_category = prefix_category;
+        } else {
+            // Unknown command, default to OTHER
+            effective_category = EVENT_OTHER;
+        }
     }
-      
-    // Determine command category and early exit if not auditable
-    if (cmd_info != NULL) {
-        //DBG fprintf(stderr, "AUDIT DEBUG | FilterAction: %d \n", cmd_info->filter_action);
-        // Check if command is explicitly excluded
-        if (cmd_info->filter_action == FILTER_EXCLUDE) {
+
+    // Early exit if client is excluded
+    // Optimized for: client_no_audit=true, is_config_cmd=false being most common
+    if (client_no_audit) {
+        // Fast path: not a config command (most common)
+        if (effective_category != EVENT_CONFIG) {
+            audit_metrics_inc_exclusion();
+            return;  // Skip audit
+        }
+        // Slower path: is a config command, check if we must audit it
+        if (!config.always_audit_config) {
+            audit_metrics_inc_exclusion();
+            return;  // Skip audit
+        }
+    }
+    
+    // Set flag to force audit for config commands if configured
+    int force_audit_config = (effective_category == EVENT_CONFIG && config.always_audit_config);
+    
+    if (!force_audit_config) {
+        // Check prefix filter result
+        if (prefix_result == FILTER_EXCLUDE) {
             audit_metrics_inc_exclusion();
             return;
         }
-    } else if (prefix_category != 0) {
-        // Use category from prefix filter if hash table had no match
-        effective_category = prefix_category;
-    } else {
-        // Unknown command, default to OTHER
-        effective_category = EVENT_OTHER;
+        
+        // Check if command is explicitly excluded
+        if (cmd_info != NULL) {
+            //DBG fprintf(stderr, "AUDIT DEBUG | FilterAction: %d \n", cmd_info->filter_action);
+            if (cmd_info->filter_action == FILTER_EXCLUDE) {
+                audit_metrics_inc_exclusion();
+                return;
+            }
+        }
+        
+        // Check if this category is enabled in event mask
+        if (!(config.event_mask & effective_category)) {
+            audit_metrics_inc_exclusion();
+            return;
+        }
     }
-    
-    // Check if this category is enabled in event mask
-    if (!(config.event_mask & effective_category)) {
-        audit_metrics_inc_exclusion();
-        return;
-    }
-    
+
     // Get category name for logging 
     category_str = getCategoryName(effective_category);
 
@@ -4375,7 +4470,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
         else if (i < argc-1 && strcasecmp(arg, "tcp_buffer") == 0) {
             const char *buffer = ValkeyModule_StringPtrLen(argv[i+1], NULL);
             i++;
-            
+
             if (strcasecmp(buffer, "yes") == 0 || strcasecmp(buffer, "1") == 0) {
                 config.tcp_buffer_on_disconnect = 1;
             } else if (strcasecmp(buffer, "no") == 0 || strcasecmp(buffer, "0") == 0) {
@@ -4384,8 +4479,21 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                 ValkeyModule_Log(ctx, "warning", "Unknown value for tcp_buffer '%s', using default", buffer);
             }
         }
+        // Handle ignore_internal_clients argument
+        else if (i < argc-1 && strcasecmp(arg, "ignore_internal_clients") == 0) {
+            const char *ignore_internal = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;
+
+            if (strcasecmp(ignore_internal, "yes") == 0 || strcasecmp(ignore_internal, "1") == 0) {
+                config.ignore_internal_clients = 1;
+            } else if (strcasecmp(ignore_internal, "no") == 0 || strcasecmp(ignore_internal, "0") == 0) {
+                config.ignore_internal_clients = 0;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown value for ignore_internal_clients '%s', using default", ignore_internal);
+            }
+        }
     }
-        
+
     return VALKEYMODULE_OK;
 }
 
@@ -4646,8 +4754,16 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
             1000,         // Maximum 1 seconds (adjust as needed)
             getAuthResultCheckDelay, setAuthResultCheckDelay, 
             NULL, NULL) == VALKEYMODULE_ERR) {
-    return VALKEYMODULE_ERR;
-}
+        return VALKEYMODULE_ERR;
+    }
+
+    // Register ignore flag for internal clients
+    if (ValkeyModule_RegisterBoolConfig(ctx, "ignore_internal_clients", config.ignore_internal_clients, 
+            VALKEYMODULE_CONFIG_DEFAULT,
+            getIgnoreInternalClients, setIgnoreInternalClients, 
+            NULL, NULL) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
 
     // Register buffer size configuration
     //if (ValkeyModule_RegisterNumericConfig(ctx, "buffer_size", config.buffer_size,
@@ -4658,11 +4774,6 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     //       NULL, NULL) == VALKEYMODULE_ERR) {
     //    return VALKEYMODULE_ERR;
     //}
-
-    // Load all configurations
-    if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
-        return VALKEYMODULE_ERR;
-    }
 
     // audit.exclude_commands
     if (ValkeyModule_RegisterStringConfig(ctx, "exclude_commands", "", 
@@ -4688,6 +4799,11 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
+    // Load all configurations
+    if (ValkeyModule_LoadConfigs(ctx) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+    
     // Register the AUDITUSERS command separately (keeping it as a top-level command)
     if (ValkeyModule_CreateCommand(ctx, "auditusers", 
             AuditUsersCommand,

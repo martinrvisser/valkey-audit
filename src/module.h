@@ -54,7 +54,8 @@ typedef struct AuditConfig {
     int syslog_priority;
     int always_audit_config;
     int auth_result_check_delay_ms; // Delay for auth result check in milliseconds
-
+    int ignore_internal_clients; // New flag to ignore internal clients
+    
     /* TCP-specific settings */
     char *tcp_host;
     int tcp_port;
