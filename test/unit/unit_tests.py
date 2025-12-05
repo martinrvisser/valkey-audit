@@ -350,7 +350,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         config = self.redis.execute_command("CONFIG GET AUDIT.*")
         
         # Check structure - Redis returns flat key-value pairs
-        self.assertEqual(len(config), 38, "Config should have 38 items")
+        self.assertEqual(len(config), 40, "Config should have 38 items")
         
         # Convert flat array to dictionary (every two elements form a key-value pair)
         config_dict = {}
@@ -372,6 +372,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
         self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
         self.assertIn("audit.auth_result_check_delay_ms", config_dict, "Missing audit.auth_result_check_delay_ms config")
+        self.assertIn("audit.ignore_internal_clients", config_dict, "Missing audit.ignore_internal_clients config")
 
         # Check protocol is set to file
         self.assertEqual(config_dict["audit.protocol"], "file "+self.log_file, 

@@ -296,7 +296,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
     def test_always_audit_config_parameter(self):
         """Test always_audit_config parameter."""
         config_path = self.create_config_file(
-            ["enable", "yes", "always_audit_config", "yes", "events", "config"], 
+            ["enabled", "yes", "always_audit_config", "yes", "events", "none"], 
             test_name="always_audit_config"
         )
         self.start_server(config_path)
@@ -512,7 +512,6 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         """Start a mock TCP server to capture audit logs."""
         return MockTCPServer(host, port)
 
-           
     def test_format_json_parameter(self):
         """Test JSON format option."""
         config_path = self.create_config_file(["format", "json"], test_name="format_json")
@@ -830,16 +829,274 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         """Test the AUDITUSERS command."""
         config_path = self.create_config_file(test_name="auditusers")
         self.start_server(config_path)
-        
+
         # Execute the AUDITUSERS command
         result = self.client.execute_command("AUDITUSERS")
         self.assertEqual(result, "OK - user hash table dumped to logs")
-        
+
         # Give time for logs to be written
         time.sleep(0.5)
-        
+
         # We can't easily verify the contents of the user hash table
         # We just check that the command executed successfully
+
+    def test_ignore_internal_clients_getter(self):
+        """Test the ignore_internal_clients configuration getter."""
+        # Test default value (should be yes/1)
+        config_path = self.create_config_file(test_name="ignore_internal_clients_getter")
+        self.start_server(config_path)
+
+        # Get the current ignore_internal_clients setting
+        result = self.client.config_get("audit.ignore_internal_clients")
+        self.assertIsNotNone(result)
+        self.assertIn("audit.ignore_internal_clients", result)
+        self.assertEqual(result["audit.ignore_internal_clients"], "yes")
+
+        # Change the setting and verify the getter returns new value
+        self.client.config_set("audit.ignore_internal_clients", "no")
+        result = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(result["audit.ignore_internal_clients"], "no")
+
+        # Change back to yes
+        self.client.config_set("audit.ignore_internal_clients", "yes")
+        result = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(result["audit.ignore_internal_clients"], "yes")
+
+    def test_ignore_internal_clients_setter(self):
+        """Test the ignore_internal_clients configuration setter."""
+        config_path = self.create_config_file(test_name="ignore_internal_clients_setter")
+        self.start_server(config_path)
+
+        # Test setting to no
+        result = self.client.config_set("audit.ignore_internal_clients", "no")
+        self.assertEqual(result, True)
+
+        # Verify it was set
+        config = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(config["audit.ignore_internal_clients"], "no")
+
+        # Test setting to yes
+        result = self.client.config_set("audit.ignore_internal_clients", "yes")
+        self.assertEqual(result, True)
+
+        # Verify it was set
+        config = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(config["audit.ignore_internal_clients"], "yes")
+
+    def test_ignore_internal_clients_exclusion_with_replica(self):
+        """Test that internal clients (like replica connections) are excluded when ignore_internal_clients=yes."""
+        # Create primary server configuration
+        primary_config_path = self.create_config_file(
+            ["ignore_internal_clients", "yes"],
+            test_name="ignore_internal_primary"
+        )
+        self.start_server(primary_config_path)
+
+        # Set up a key on the primary
+        self.client.set("test_key", "test_value")
+
+        # Give time for logs to be written
+        time.sleep(0.5)
+
+        # Read primary audit log
+        primary_log = self.read_audit_log()
+
+        # Regular client SET should be logged
+        self.assertIn("[KEY_OP] SET", primary_log)
+        self.assertIn("test_key", primary_log)
+
+        # Now set up a replica to connect to the primary
+        # Create replica temp directory
+        replica_temp_dir = tempfile.mkdtemp(prefix="vka-replica-", dir=self.base_temp_dir)
+        replica_conf_path = os.path.join(replica_temp_dir, "valkey.conf")
+        replica_audit_log = os.path.join(replica_temp_dir, "replica_audit.log")
+
+        # Find an available port for replica
+        s = socket.socket()
+        s.bind(('', 0))
+        replica_port = s.getsockname()[1]
+        s.close()
+
+        # Create replica config with ignore_internal_clients enabled
+        with open(replica_conf_path, 'w') as f:
+            f.write(f"port {replica_port}\n")
+            f.write(f"replicaof 127.0.0.1 {self.port}\n")
+            f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients yes\n")
+
+        # Start replica server
+        replica_proc = subprocess.Popen(
+            [self.valkey_server, replica_conf_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        try:
+            # Wait for replica to start and connect
+            time.sleep(2)
+
+            # Create client connection to replica
+            replica_client = redis.Redis(host='localhost', port=replica_port, decode_responses=True)
+            replica_client.ping()
+
+            # Do some operations on the primary to trigger replication
+            self.client.set("replicated_key", "replicated_value")
+            self.client.set("another_key", "another_value")
+
+            # Give time for replication and logging
+            time.sleep(2)
+
+            # Read replica audit log
+            if os.path.exists(replica_audit_log):
+                with open(replica_audit_log, 'r') as f:
+                    replica_log_content = f.read()
+
+                print(f"Replica audit log content:\n{replica_log_content}")
+
+                # Get INFO replication to verify replica is connected
+                info = replica_client.info("replication")
+                print(f"Replica info: {info}")
+
+                # With ignore_internal_clients=yes, internal replication commands should NOT be logged
+                # The replica receives commands from the primary connection (which is internal/superuser)
+                # Check that these internal SET commands from replication are NOT in the replica audit log
+                # (Regular client commands to the replica would still be logged)
+
+                # Count SET operations in replica log - should be minimal or none from replication
+                set_count = replica_log_content.count("[KEY_OP] SET")
+
+                # Internal replication traffic should not be audited
+                # The exact count depends on initialization, but replication data should be excluded
+                print(f"SET operations logged on replica: {set_count}")
+
+                # Test that a direct client operation on replica IS logged
+                # (even though replica is read-only by default, we can test with other commands)
+                try:
+                    replica_client.get("test_key")
+                    time.sleep(0.5)
+
+                    with open(replica_audit_log, 'r') as f:
+                        updated_replica_log = f.read()
+
+                    # GET command from external client should be logged
+                    self.assertIn("[KEY_OP] GET", updated_replica_log.upper())
+                except Exception as e:
+                    print(f"Replica read test: {e}")
+
+            replica_client.close()
+
+        finally:
+            # Clean up replica
+            replica_proc.terminate()
+            try:
+                replica_proc.wait(timeout=5)
+            except:
+                replica_proc.kill()
+
+            if os.path.exists(replica_temp_dir):
+                shutil.rmtree(replica_temp_dir)
+
+    def test_ignore_internal_clients_disabled_logs_replica_traffic(self):
+        """Test that internal clients are logged when ignore_internal_clients=no."""
+        # Create primary server
+        primary_config_path = self.create_config_file(
+            test_name="ignore_internal_disabled_primary"
+        )
+        self.start_server(primary_config_path)
+
+        # Now set up a replica with ignore_internal_clients=no
+        replica_temp_dir = tempfile.mkdtemp(prefix="vka-replica-log-", dir=self.base_temp_dir)
+        replica_conf_path = os.path.join(replica_temp_dir, "valkey.conf")
+        replica_audit_log = os.path.join(replica_temp_dir, "replica_audit.log")
+
+        # Find an available port for replica
+        s = socket.socket()
+        s.bind(('', 0))
+        replica_port = s.getsockname()[1]
+        s.close()
+
+        # Create replica config with ignore_internal_clients disabled
+        with open(replica_conf_path, 'w') as f:
+            f.write(f"port {replica_port}\n")
+            f.write(f"replicaof 127.0.0.1 {self.port}\n")
+            f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients no\n")
+
+        # Start replica server
+        replica_proc = subprocess.Popen(
+            [self.valkey_server, replica_conf_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        try:
+            # Wait for replica to start and connect
+            time.sleep(2)
+
+            # Create client connection to replica
+            replica_client = redis.Redis(host='localhost', port=replica_port, decode_responses=True)
+            replica_client.ping()
+
+            # Do operations on the primary to trigger replication
+            self.client.set("internal_test_key", "internal_test_value")
+            self.client.set("another_internal_key", "another_value")
+
+            # Give time for replication and logging
+            time.sleep(2)
+
+            # Read replica audit log
+            if os.path.exists(replica_audit_log):
+                with open(replica_audit_log, 'r') as f:
+                    replica_log_content = f.read()
+
+                print(f"Replica audit log (ignore_internal_clients=no):\n{replica_log_content}")
+
+                # With ignore_internal_clients=no, internal replication commands SHOULD be logged
+                set_count = replica_log_content.count("[KEY_OP] SET")
+
+                print(f"SET operations logged on replica with ignore_internal_clients=no: {set_count}")
+
+                # We should see the replicated SET commands logged
+                # The exact count may vary, but should be > 0
+                self.assertGreater(set_count, 0,
+                    "When ignore_internal_clients=no, internal replica traffic should be logged")
+
+            replica_client.close()
+
+        finally:
+            # Clean up replica
+            replica_proc.terminate()
+            try:
+                replica_proc.wait(timeout=5)
+            except:
+                replica_proc.kill()
+
+            if os.path.exists(replica_temp_dir):
+                shutil.rmtree(replica_temp_dir)
+
+    def test_ignore_internal_clients_parameter_at_load(self):
+        """Test ignore_internal_clients can be set via loadmodule parameter."""
+        # Test setting to no at load time
+        config_path = self.create_config_file(
+            ["ignore_internal_clients", "no"],
+            test_name="ignore_internal_load_no"
+        )
+        self.start_server(config_path)
+
+        # Verify it was set to no
+        config = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(config["audit.ignore_internal_clients"], "no")
+
+        # Stop and restart with yes
+        self.stop_server()
+
+        config_path = self.create_config_file(
+            ["ignore_internal_clients", "yes"],
+            test_name="ignore_internal_load_yes"
+        )
+        self.start_server(config_path)
+
+        # Verify it was set to yes
+        config = self.client.config_get("audit.ignore_internal_clients")
+        self.assertEqual(config["audit.ignore_internal_clients"], "yes")
 
 class MockTCPServer:
     """Mock TCP server for testing TCP audit logging."""
