@@ -156,6 +156,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("exclude_test_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check user1's command should NOT be logged
@@ -185,6 +186,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("ip_exclude_test_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check neither command should be logged since both come from localhost
@@ -213,6 +215,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("specific_exclude_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check user1's command should NOT be logged (excluded by username@ip)
@@ -292,6 +295,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("after_clear_key", "value")
 
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check that the previously excluded user is now logged
@@ -363,6 +367,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check excluded user's commands are not logged
@@ -401,6 +406,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass  # Might fail if user doesn't have permission, but should still attempt
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check normal command is NOT logged (user is excluded)
@@ -424,6 +430,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check CONFIG command is NOT logged when always_audit_config is disabled
@@ -457,6 +464,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check normal command is NOT logged (IP is excluded)
@@ -497,6 +505,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.get("excluded_cmd_test")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check that excluded commands are NOT logged
@@ -536,6 +545,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("ECHO", "test")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # None should be logged
@@ -572,6 +582,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.get("prefix_test_key")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check that prefix-matched commands are NOT logged
@@ -613,6 +624,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("multi_prefix_key", "value")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Check that all prefix-matched commands are NOT logged
@@ -658,6 +670,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("custom_cat_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # First key should NOT be logged (events was set to dangerous only)
@@ -697,6 +710,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Both should be logged
@@ -734,6 +748,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("combined_exclude_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # User1's commands should NOT be logged (user excluded)
@@ -783,6 +798,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("prefix_user_exclude_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"log_line:{line}")
@@ -907,7 +923,8 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         result = self.redis_admin.execute_command("CONFIG", "GET", "AUDIT.*")
         print(f"res:{result}")
 
-        # Clear log file
+        # Clear log fil
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"LOG LINE: {line}")
@@ -918,6 +935,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         print(f"CONFIG RESULT: {result}")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"LOG LINE: {line}")
@@ -937,6 +955,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("CONFIG", "GET", "port")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # CONFIG should NOT be logged now
@@ -966,6 +985,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("CONFIG", "GET", "port")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # CONFIG should be logged despite prefix filter
@@ -1004,6 +1024,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("priority_test_key2", "value2")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # User1's commands should NOT be logged (highest priority: user exclusion)
@@ -1060,6 +1081,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.ping()
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
 
         for line in log_lines:

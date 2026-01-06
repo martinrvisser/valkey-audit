@@ -162,6 +162,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
                 print(f"Executed command result: {result}")
             
             # Read log file
+            time.sleep(0.1)
             log_lines = self._read_log_file()
 
             for line in log_lines:
@@ -184,6 +185,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         self.redis.execute_command("AUDITUSERS")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Verify no "AUDIT" command was logged (to prevent recursion)
@@ -203,6 +205,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         self.redis.execute_command("CONFIG", "GET", "port")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"Log line : {line.strip()}")
@@ -229,6 +232,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         self.redis.set("payload_test_key", large_value)
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Find the log line for our SET operation
@@ -258,6 +262,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         self.redis.set("payload_test_key2", "test_value")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Find the log line for our second SET operation
@@ -280,6 +285,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
         self.redis.set("multi_cat_test", "value")
         
         # Read log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Verify both commands were logged
@@ -307,6 +313,7 @@ class ValkeyAuditCommandLoggerTests(unittest.TestCase):
             self.redis.set(f"format_test_{fmt}", "value")
             
             # Read log file
+            time.sleep(0.1)
             log_lines = self._read_log_file()
             self.assertTrue(len(log_lines) > 0, f"No log entry generated for format {fmt}")
             
