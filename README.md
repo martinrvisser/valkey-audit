@@ -177,21 +177,23 @@ CONFIG SET audit.exclude_commands "PING,ECHO,TIME"
 ```
 
 #### Exclude commands by prefix
+These need to be preceeded with a !
 ```
-CONFIG SET audit.exclude_commands "!FT*"
+CONFIG SET audit.prefix_filter "!FT*"
 ```
 
 #### Excluding commands through a custom category
 Custom categories can be created by the user and subsequently added to the events exclusion list
 
-##### Define custom category
+##### Define custom category and associated commands
+The format here is "categoryname:commands in this category"
 ```
-CONFIG SET audit.custom_category flushes "FLUSHDB,FLUSHALL"
+CONFIG SET audit.custom_category "flushes:FLUSHDB,FLUSHALL"
 ```
 
 ##### Define custom admin category  
 ```
-CONFIG SET audit.custom_category admin "CONFIG,ACL,SAVE,BGSAVE"
+CONFIG SET audit.custom_category "admin:CONFIG,ACL,SAVE,BGSAVE"
 ```
 
 ##### Then use in event mask

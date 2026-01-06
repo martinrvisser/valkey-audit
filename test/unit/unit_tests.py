@@ -163,6 +163,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             self.redis.set("format_test_key", "value")
             
             # Read the log file
+            time.sleep(0.1)
             log_lines = self._read_log_file()
             self.assertTrue(len(log_lines) > 0, f"No log entries for format {fmt}")
             
@@ -203,11 +204,13 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self._clear_log_file()
         self.redis.execute_command("CONFIG", "GET", "port")
 
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         assert len(log_lines) > 0, "Audit logging not working"
 
         # Test setting specific events
         self.redis.execute_command("CONFIG", "SET", "AUDIT.EVENTS", "config")
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         print(f"Log lines: {len(log_lines)}")
 
@@ -221,6 +224,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         time.sleep(1)
         
         print("Checking log file for CONFIG only events")
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         print(f"Log lines: {len(log_lines)}")
         
@@ -245,6 +249,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.redis.execute_command("FLUSHDB")  # Other operation (administrative)
         
         # Check log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # All three event types should be logged
@@ -268,6 +273,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.redis.execute_command("CLIENT", "LIST")  # Other operation - should be logged
         
         # Check log file
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         
         # Only OTHER events should be logged
@@ -290,6 +296,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.redis.execute_command("INFO", "server")
         
         # Check log file - should be empty
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         self.assertEqual(len(log_lines), 0, "Events were logged when all should be disabled")
         
@@ -308,6 +315,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.redis.set("payload_key", "abcdefghijklmnopqrstuvwxyz")
         
         # Check log file - payload should be truncated
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         payload_line = next((line for line in log_lines if "payload_key" in line), None)
         self.assertIsNotNone(payload_line, "Key operation was not logged")
@@ -333,6 +341,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.redis.set("payload_key2", "test_value")
         
         # Check log file - should not contain payload
+        time.sleep(0.1)
         log_lines = self._read_log_file()
         payload_line = next((line for line in log_lines if "payload_key2" in line), None)
         self.assertIsNotNone(payload_line, "Key operation was not logged")

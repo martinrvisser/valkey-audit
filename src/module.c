@@ -3694,6 +3694,7 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
                            void *privdata, ValkeyModuleString **err) {
     VALKEYMODULE_NOT_USED(name);
     VALKEYMODULE_NOT_USED(privdata);
+    VALKEYMODULE_NOT_USED(err);  // Don't use err at all
     
     size_t len;
     const char *category_spec = ValkeyModule_StringPtrLen(new_val, &len);
@@ -3707,7 +3708,6 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
     // Parse format: "category_name:command1,command2,command3"
     char *copy = ValkeyModule_Alloc(len + 1);
     if (!copy) {
-        *err = ValkeyModule_CreateString(NULL, "ERR: Memory allocation failed", -1);
         return VALKEYMODULE_ERR;
     }
     memcpy(copy, category_spec, len);
@@ -3716,8 +3716,7 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
     // Find the colon separator
     char *colon = strchr(copy, ':');
     if (!colon) {
-        *err = ValkeyModule_CreateString(NULL, 
-            "ERR: Format must be 'category_name:command1,command2'", -1);
+        // REMOVED: *err = ValkeyModule_CreateString(NULL, ...)
         ValkeyModule_Free(copy);
         return VALKEYMODULE_ERR;
     }
@@ -3734,8 +3733,7 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
     // Get or create category
     uint32_t category_bit = getOrCreateCategory(category_name);
     if (category_bit == 0) {
-        *err = ValkeyModule_CreateString(NULL, 
-            "ERR: Failed to create category (too many categories?)", -1);
+        // REMOVED: *err = ValkeyModule_CreateString(NULL, ...)
         ValkeyModule_Free(copy);
         return VALKEYMODULE_ERR;
     }
@@ -3753,8 +3751,7 @@ int setAuditCustomCategory(const char *name, ValkeyModuleString *new_val,
         if (strlen(token) > 0) {
             // Add or update command with this category
             if (addOrUpdateUserCommand(token, 0, 0, 0, FILTER_AUDIT, category_bit) != VALKEYMODULE_OK) {
-                *err = ValkeyModule_CreateString(NULL, 
-                    "ERR: Failed to add command to category", -1);
+                // REMOVED: *err = ValkeyModule_CreateString(NULL, ...)
                 ValkeyModule_Free(copy);
                 return VALKEYMODULE_ERR;
             }
