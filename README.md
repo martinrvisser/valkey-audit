@@ -272,3 +272,4 @@ Example in text format:
 ## License
 
 This module is licensed under the same terms as Valkey itself.
+
