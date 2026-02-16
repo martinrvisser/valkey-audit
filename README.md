@@ -52,6 +52,7 @@ Available parameters:
 - `audit.tcp_buffer_on_disconnect`: buffer messages during disconnected state from target TCP destination.
 - `audit.tcp_reconnect_on_failure`: automatic reconnect to TCP destination on failure.
 - `audit.auth_result_check_delay_ms`: delay in milliseconds to delay checking for auth success
+- `audit.ignore_internal_clients` : do not audit internal clients like replication clients
 
 
 ## Example Usage
@@ -272,4 +273,5 @@ Example in text format:
 ## License
 
 This module is licensed under the same terms as Valkey itself.
+
 
