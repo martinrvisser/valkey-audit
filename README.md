@@ -111,14 +111,23 @@ Available event categories:
 
 ### command_result_mode
 
-Controls which commands are logged:
+Controls which command executions produce an audit log entry.
 
 ```
-CONFIG SET AUDIT.COMMAND_RESULT_MODE all       # log every command execution
-CONFIG SET AUDIT.COMMAND_RESULT_MODE failures  # log only failures and rejections (default)
+CONFIG SET AUDIT.COMMAND_RESULT_MODE failures  # default
+CONFIG SET AUDIT.COMMAND_RESULT_MODE all
 ```
 
-Note: this setting takes effect at module load time. Changing it at runtime updates the configuration value but does not change the active event subscription until the module is reloaded.
+**`failures` (default)** — logs only commands that did not complete successfully:
+- Commands that executed but returned an error (e.g. `WRONGTYPE`, out-of-range index)
+- Commands rejected before execution: wrong argument count, unknown command, OOM, read-only replica, busy script, etc.
+- ACL rejections: `NOPERM` (command, key, channel, or database) and `NOAUTH`
+
+Successful command executions produce no log entry. The server performs an O(1) listener-count check and skips all event preparation for successful commands, so there is zero per-command overhead for clean traffic.
+
+**`all`** — additionally logs every successful command execution. Equivalent in coverage to the pre-execution command filter approach, with the added benefit of capturing actual execution outcome, duration, and keys modified.
+
+Note: this setting takes effect at module load time. Changing it at runtime updates the stored value but the active event subscription does not change until the module is reloaded.
 
 ### payload
 
