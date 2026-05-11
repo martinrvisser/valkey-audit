@@ -52,7 +52,8 @@ static AuditConfig config = {
     .tcp_retry_count = 0,
     .worker_running = 0,
     .shutdown_flag = 0,
-    .ignore_internal_clients = 1
+    .ignore_internal_clients = 1,
+    .command_result_mode = RESULT_MODE_FAILURES
 };
 
 // Forward declarations
@@ -63,7 +64,6 @@ static void closeTcp(void);
 static size_t circularBufferWrite(const char *data, size_t len);
 static size_t circularBufferRead(char *dest, size_t max_len);
 
-static ValkeyModuleCommandFilter *filter;
 static ClientUsernameEntry *username_hash[USERNAME_HASH_SIZE] = {0};
 
 // Global head of the linked list for excluded usernames
@@ -989,70 +989,86 @@ void writeAuditLog(const char *format, ...) {
     pthread_mutex_unlock(&config.log_mutex);
 }
 
-static void formatEventText(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *client_ip, int client_port, const char *flag) {
+static void formatEventText(char *buffer, size_t size, const char *category, const char *command, const char *command_args, unsigned long long client_id, const char *username, const char *client_ip, int client_port, const char *flag, long long duration_us, long long dirty, const char *error) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-    
-    snprintf(buffer, size, "[%s] [%s] %s %s %s %s:%d %s %s", 
-             timestamp, category, command, flag, username, client_ip, client_port, server_hostname, details ? details : "");
+
+    snprintf(buffer, size, "[%s] [%s] %s result=%s duration_us=%lld keys_modified=%lld client_id=%llu username=%s client_ip=%s:%d server_hostname=%s%s%s%s%s",
+             timestamp, category, command, flag, duration_us, dirty, client_id, username, client_ip, client_port, server_hostname,
+             (command_args && *command_args) ? " " : "",
+             (command_args && *command_args) ? command_args : "",
+             (error && *error) ? " " : "",
+             (error && *error) ? error : "");
 }
 
-static void formatEventJson(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *client_ip, int client_port, const char * flag) {
+static void formatEventJson(char *buffer, size_t size, const char *category, const char *command, const char *command_args, unsigned long long client_id, const char *username, const char *client_ip, int client_port, const char *flag, long long duration_us, long long dirty, const char *error) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-    
+
     snprintf(buffer, size,
-        "{\"timestamp\":\"%s\",\"category\":\"%s\",\"command\":\"%s\",\"result\":\"%s\",\"username\":\"%s\",\"client_ip\":\"%s\",\"client_port\":%d,\"server_hostname\":\"%s\",\"details\":\"%s\"}",
-        timestamp, category, command, flag, username, client_ip, client_port, server_hostname, details ? details : "null");
+        "{\"timestamp\":\"%s\",\"category\":\"%s\",\"command\":\"%s\",\"command_args\":\"%s\",\"result\":\"%s\",\"duration_us\":%lld,\"keys_modified\":%lld,\"client_id\":%llu,\"username\":\"%s\",\"client_ip\":\"%s\",\"client_port\":%d,\"server_hostname\":\"%s\",\"error\":\"%s\"}",
+        timestamp, category, command, command_args ? command_args : "", flag, duration_us, dirty, client_id, username, client_ip, client_port, server_hostname, error ? error : "");
 }
 
-static void formatEventCsv(char *buffer, size_t size, const char *category, const char *command, const char *details, const char *username, const char *client_ip, int client_port, const char * flag) {
+static void formatEventCsv(char *buffer, size_t size, const char *category, const char *command, const char *command_args, unsigned long long client_id, const char *username, const char *client_ip, int client_port, const char *flag, long long duration_us, long long dirty, const char *error) {
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     char timestamp[26];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-    
-    // Escape any commas in the details
-    char escaped_details[1024] = "";
-    if (details) {
-        const char *src = details;
-        char *dst = escaped_details;
-        while (*src && (dst - escaped_details < sizeof(escaped_details) - 2)) {
-            if (*src == ',') {
-                *dst++ = '\\';
-            }
+
+    char escaped_args[1024] = "";
+    if (command_args) {
+        const char *src = command_args;
+        char *dst = escaped_args;
+        while (*src && (dst - escaped_args < (int)sizeof(escaped_args) - 2)) {
+            if (*src == ',') *dst++ = '\\';
             *dst++ = *src++;
         }
         *dst = '\0';
     }
-    
-    snprintf(buffer, size, "%s,%s,%s,%s,%s,%s,%d,%s,%s", 
-             timestamp, category, command, flag, username, client_ip, client_port, server_hostname, escaped_details);
+
+    char escaped_error[512] = "";
+    if (error) {
+        const char *src = error;
+        char *dst = escaped_error;
+        while (*src && (dst - escaped_error < (int)sizeof(escaped_error) - 2)) {
+            if (*src == ',') *dst++ = '\\';
+            *dst++ = *src++;
+        }
+        *dst = '\0';
+    }
+
+    snprintf(buffer, size, "%s,%s,%s,%s,%s,%lld,%lld,%llu,%s,%s,%d,%s,%s",
+             timestamp, category, command, escaped_args, flag, duration_us, dirty, client_id, username, client_ip, client_port, server_hostname, escaped_error);
 }
 
-static void logAuditEvent(const char *category, const char *command, const char *details, const char *username, const char *client_ip, int client_port, int flag) {
+static void logAuditEventFull(const char *category, const char *command, const char *command_args, unsigned long long client_id, const char *username, const char *client_ip, int client_port, int flag, long long duration_us, long long dirty, const char *error) {
     char buffer[4096];
     const char* flag_texts[] = {"FAILURE", "SUCCESS", "ATTEMPT", "EXECUTE", "ERROR", "DEBUG"};
     const char* flag_text = flag_texts[flag];
 
     switch(config.format) {
         case FORMAT_JSON:
-            formatEventJson(buffer, sizeof(buffer), category, command, details, username, client_ip, client_port, flag_text);
+            formatEventJson(buffer, sizeof(buffer), category, command, command_args, client_id, username, client_ip, client_port, flag_text, duration_us, dirty, error);
             break;
         case FORMAT_CSV:
-            formatEventCsv(buffer, sizeof(buffer), category, command, details, username, client_ip, client_port, flag_text);
+            formatEventCsv(buffer, sizeof(buffer), category, command, command_args, client_id, username, client_ip, client_port, flag_text, duration_us, dirty, error);
             break;
         case FORMAT_TEXT:
         default:
-            formatEventText(buffer, sizeof(buffer), category, command, details, username, client_ip, client_port, flag_text);
+            formatEventText(buffer, sizeof(buffer), category, command, command_args, client_id, username, client_ip, client_port, flag_text, duration_us, dirty, error);
             break;
     }
-    
+
     writeAuditLog("%s", buffer);
+}
+
+static void logAuditEvent(const char *category, const char *command, const char *command_args, unsigned long long client_id, const char *username, const char *client_ip, int client_port, int flag) {
+    logAuditEventFull(category, command, command_args, client_id, username, client_ip, client_port, flag, 0, 0, "");
 }
 
 // Function to gather current filter statistics
@@ -1375,8 +1391,8 @@ ClientUsernameEntry* getClientEntry(uint64_t client_id) {
 
 // Add or update a client ID to username mapping
 // also set the no_audit flag if the username is to be excluded
-void storeClientInfo(uint64_t client_id, const char *username, const char *ip_address, 
-                     int client_port, int no_audit, mstime_t auth_timestamp) {
+void storeClientInfo(uint64_t client_id, const char *username, const char *ip_address,
+                     int client_port, int no_audit) {
     // Allocate memory for the new entry
     ClientUsernameEntry *entry = ValkeyModule_Alloc(sizeof(ClientUsernameEntry));
     if (entry == NULL) {
@@ -1409,7 +1425,6 @@ void storeClientInfo(uint64_t client_id, const char *username, const char *ip_ad
     entry->ip_address = ip_copy;
     entry->client_port = client_port;
     entry->no_audit = no_audit;
-    entry->auth_timestamp = auth_timestamp;
     entry->next = NULL;
     
     // Calculate hash value (using simple modulo hash)
@@ -1439,7 +1454,6 @@ void storeClientInfo(uint64_t client_id, const char *username, const char *ip_ad
                 
                 current->client_port = client_port;
                 current->no_audit = no_audit;
-                current->auth_timestamp = auth_timestamp;  
                 ValkeyModule_Free(entry);  
                 return;
             }
@@ -1517,13 +1531,12 @@ void printUserHashContents(ValkeyModuleCtx *ctx) {
         ClientUsernameEntry *entry = username_hash[i];
         
         while (entry && remaining > 0) {
-            int written = snprintf(buffer + offset, remaining, 
-                      "Client ID: %llu, Username: %s, ClientIP: %s, ClientPort: %d, Auth Timestamp: %lld, NoAudit: %d \n", 
-                      (unsigned long long)entry->client_id, 
+            int written = snprintf(buffer + offset, remaining,
+                      "Client ID: %llu, Username: %s, ClientIP: %s, ClientPort: %d, NoAudit: %d \n",
+                      (unsigned long long)entry->client_id,
                       entry->username ? entry->username : "NULL",
                       entry->ip_address,
                       entry->client_port,
-                      (long long)entry->auth_timestamp,
                       entry->no_audit);
             
             if (written > 0 && (size_t)written < remaining) {
@@ -1553,10 +1566,13 @@ void printUserHashContents(ValkeyModuleCtx *ctx) {
 
 // Get client type string
 static const char* getClientTypeStr(ValkeyModuleClientInfo *ci) {
-    if (ci->flags & (1ULL << 0)) return "normal";
-    if (ci->flags & (1ULL << 1)) return "replica";
-    if (ci->flags & (1ULL << 2)) return "pubsub";
-    return "unknown";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_FAKE)    return "internal";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_PRIMARY) return "primary";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_REPLICA) return "replica";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_MODULE)  return "module";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_MONITOR) return "monitor";
+    if (ci->flags & VALKEYMODULE_CLIENTINFO_FLAG_PUBSUB)  return "pubsub";
+    return "normal";
 }
 
 // Helper function to update client username when auth fails with different username
@@ -1589,457 +1605,6 @@ void updateClientUsernameOnAuthFailure(ValkeyModuleCtx *ctx, uint64_t client_id)
         }
     }
 }
-
-// Timer callback to check auth result
-// NOTE: ACL LOG only contains FAILURES, so:
-// - If we find a matching entry = AUTH FAILED
-// - If we find NO matching entry = AUTH SUCCEEDED
-void checkAuthResultTimer(ValkeyModuleCtx *ctx, void *data) {
-    ValkeyModule_AutoMemory(ctx);  
-    
-    uint64_t *client_id_ptr = (uint64_t *)data;
-    if (!client_id_ptr) return;
-    
-    uint64_t client_id = *client_id_ptr;
-    
-    // Find the client info in our hash table
-    ClientUsernameEntry *client_entry = getClientEntry(client_id);
-    if (!client_entry) {
-        ValkeyModule_Free(client_id_ptr);  
-        return;
-    }
-    
-    // Skip processing if this entry has no auth timestamp
-    if (client_entry->auth_timestamp == 0) {
-        ValkeyModule_Free(client_id_ptr);
-        return;
-    }
-    
-    ValkeyModuleCallReply *reply = NULL;
-    int auth_failed = 0;
-    char actual_username[256] = {0};
-    char failure_reason[512] = {0};
-    
-    char debug_msg[512];
-    if (loglevel_debug) {
-        snprintf(debug_msg, sizeof(debug_msg), 
-                "Timer checking auth result for client #%llu, auth_timestamp: %lld", 
-                (unsigned long long)client_id, (long long)client_entry->auth_timestamp);
-        logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                    client_entry->username ? client_entry->username : "unknown", 
-                    client_entry->ip_address ? client_entry->ip_address : "unknown",
-                    client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-    }
-    // Get ALL recent ACL LOG entries (no limit - we'll stop based on timestamp)
-    reply = ValkeyModule_Call(ctx, "ACL", "0c", "LOG");
-    if (!reply) {
-        goto cleanup;
-    }
-    
-    if (ValkeyModule_CallReplyType(reply) == VALKEYMODULE_REPLY_ERROR) {
-        goto cleanup;
-    }
-    
-    if (ValkeyModule_CallReplyType(reply) != VALKEYMODULE_REPLY_ARRAY) {
-        goto cleanup;
-    }
-    
-    size_t num_entries = ValkeyModule_CallReplyLength(reply);
-    
-    if (loglevel_debug) {
-        snprintf(debug_msg, sizeof(debug_msg), "Found %zu ACL LOG entries to check, reply type: %d", 
-                num_entries, ValkeyModule_CallReplyType(reply));
-        logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                    client_entry->username ? client_entry->username : "unknown", 
-                    client_entry->ip_address ? client_entry->ip_address : "unknown",
-                    client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-    }
-
-    // Look for a matching auth failure in the ACL entries
-    // since ACL LOG aggregates, check the last-update-timestamp
-    for (size_t i = 0; i < num_entries; i++) {
-        ValkeyModuleCallReply *entry = ValkeyModule_CallReplyArrayElement(reply, i);
-        size_t entry_len = ValkeyModule_CallReplyLength(entry);
-
-        if (loglevel_debug) {
-            if (ValkeyModule_CallReplyType(entry) != VALKEYMODULE_REPLY_ARRAY) {
-                snprintf(debug_msg, sizeof(debug_msg), "Entry %zu is not an array, type: %d", 
-                        i, ValkeyModule_CallReplyType(entry));
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                            client_entry->username ? client_entry->username : "unknown", 
-                            client_entry->ip_address ? client_entry->ip_address : "unknown",
-                            client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                continue;
-            }
-            if (entry_len < 10) {
-                snprintf(debug_msg, sizeof(debug_msg), "Entry %zu too short: %zu fields", i, entry_len);
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                            client_entry->username ? client_entry->username : "unknown", 
-                            client_entry->ip_address ? client_entry->ip_address : "unknown",
-                            client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                continue;
-            }
-        }
-
-        // Parse the ACL LOG entry
-        char reason[64] = {0};
-        char username[256] = {0}; 
-        char client_info_log[1024] = {0};
-        char context[64] = {0};
-        mstime_t timestamp = 0;
-        long long count = 1;
-        int found_client_match = 0;
-        
-        // Single pass: extract all fields in one go
-        for (size_t j = 0; j < entry_len; j += 2) {
-            if (j + 1 >= entry_len) break;
-            
-            ValkeyModuleCallReply *key_reply = ValkeyModule_CallReplyArrayElement(entry, j);
-            ValkeyModuleCallReply *value_reply = ValkeyModule_CallReplyArrayElement(entry, j + 1);
-            size_t key_len;
-            const char *key_ptr = ValkeyModule_CallReplyStringPtr(key_reply, &key_len);
-            
-            if (loglevel_debug) {
-                if (!key_reply || !value_reply) {
-                    snprintf(debug_msg, sizeof(debug_msg), "NULL reply at index %zu", j);
-                    logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                client_entry->username ? client_entry->username : "unknown", 
-                                client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                    continue;
-                }
-                
-                if (!key_ptr) {
-                    snprintf(debug_msg, sizeof(debug_msg), "Key at index %zu is not a string, type: %d", 
-                            j, ValkeyModule_CallReplyType(key_reply));
-                    logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                client_entry->username ? client_entry->username : "unknown", 
-                                client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                    continue;
-                }
-            }
-
-            // Create a null-terminated copy of the key for proper string comparison
-            char key[64] = {0};
-            if (key_len > 0 && key_len < sizeof(key) - 1) {
-                strncpy(key, key_ptr, key_len);
-                key[key_len] = '\0';
-            } else {
-                continue; 
-            }
-            
-            if (loglevel_debug) {
-                snprintf(debug_msg, sizeof(debug_msg), "Key[%zu]: '%s' (len=%zu, type=%d)", 
-                        j, key, key_len, ValkeyModule_CallReplyType(key_reply));
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                            client_entry->username ? client_entry->username : "unknown", 
-                            client_entry->ip_address ? client_entry->ip_address : "unknown",
-                            client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                
-                int value_type = ValkeyModule_CallReplyType(value_reply);
-                if (value_type == VALKEYMODULE_REPLY_STRING) {
-                    size_t value_len;
-                    const char *value = ValkeyModule_CallReplyStringPtr(value_reply, &value_len);
-                    snprintf(debug_msg, sizeof(debug_msg), "Value[%zu]: '%.*s' (len=%zu, type=STRING)", 
-                            j+1, (int)(value_len > 50 ? 50 : value_len), value ? value : "NULL", value_len);
-                } else if (value_type == VALKEYMODULE_REPLY_INTEGER) {
-                    long long value = ValkeyModule_CallReplyInteger(value_reply);
-                    snprintf(debug_msg, sizeof(debug_msg), "Value[%zu]: %lld (type=INTEGER)", j+1, value);
-                } else {
-                    snprintf(debug_msg, sizeof(debug_msg), "Value[%zu]: (type=%d - not string or int)", j+1, value_type);
-                }
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                            client_entry->username ? client_entry->username : "unknown", 
-                            client_entry->ip_address ? client_entry->ip_address : "unknown",
-                            client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-            }
-
-            // COPY strings to local buffers instead of storing pointers
-            if (strcmp(key, "reason") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_STRING) {
-                    size_t reason_len;
-                    const char *reason_ptr = ValkeyModule_CallReplyStringPtr(value_reply, &reason_len);
-                    if (reason_ptr && reason_len > 0 && reason_len < sizeof(reason) - 1) {
-                        strncpy(reason, reason_ptr, reason_len);
-                        reason[reason_len] = '\0';  // Ensure null termination
-                        if (loglevel_debug) {
-                            snprintf(debug_msg, sizeof(debug_msg), "COPIED reason: '%.20s'", reason);
-                            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                     client_entry->username ? client_entry->username : "unknown", 
-                                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                     client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                        }
-                    }
-                }
-            } else if (strcmp(key, "username") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_STRING) {
-                    size_t username_len;
-                    const char *username_ptr = ValkeyModule_CallReplyStringPtr(value_reply, &username_len);
-                    if (username_ptr && username_len > 0 && username_len < sizeof(username) - 1) {
-                        strncpy(username, username_ptr, username_len);
-                        username[username_len] = '\0';  // Ensure null termination
-                        if (loglevel_debug) {
-                            snprintf(debug_msg, sizeof(debug_msg), "COPIED username: '%.50s'", username);
-                            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                     client_entry->username ? client_entry->username : "unknown", 
-                                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                     client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                            }
-                    }
-                }
-            } else if (strcmp(key, "client-info") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_STRING) {
-                    size_t client_info_len;
-                    const char *client_info_ptr = ValkeyModule_CallReplyStringPtr(value_reply, &client_info_len);
-                    if (client_info_ptr && client_info_len > 0 && client_info_len < sizeof(client_info_log) - 1) {
-                        strncpy(client_info_log, client_info_ptr, client_info_len);
-                        client_info_log[client_info_len] = '\0';  // Ensure null termination
-                    }
-                }
-            } else if (strcmp(key, "context") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_STRING) {
-                    size_t context_len;
-                    const char *context_ptr = ValkeyModule_CallReplyStringPtr(value_reply, &context_len);
-                    if (context_ptr && context_len > 0 && context_len < sizeof(context) - 1) {
-                        strncpy(context, context_ptr, context_len);
-                        context[context_len] = '\0';  // Ensure null termination
-                        if (loglevel_debug) {
-                            snprintf(debug_msg, sizeof(debug_msg), "COPIED context: '%.20s'", context);
-                            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                     client_entry->username ? client_entry->username : "unknown", 
-                                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                     client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                        }
-                    }
-                }
-            } else if (strcmp(key, "count") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_INTEGER) {
-                    count = ValkeyModule_CallReplyInteger(value_reply);
-                }
-            } else if (strcmp(key, "timestamp-last-updated") == 0) {
-                if (ValkeyModule_CallReplyType(value_reply) == VALKEYMODULE_REPLY_INTEGER) {
-                    timestamp = (mstime_t)ValkeyModule_CallReplyInteger(value_reply);
-                    if (loglevel_debug) {
-                        snprintf(debug_msg, sizeof(debug_msg), "ASSIGNED timestamp: %lld", (long long)timestamp);
-                        logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                 client_entry->username ? client_entry->username : "unknown", 
-                                 client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                 client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                    }
-                }
-            }
-        }
-        
-        // Check if this entry is older than our auth attempt, skip if so
-        // (ACL LOG is ordered newest first, so all subsequent entries will be even older)
-        if (timestamp > 0 && timestamp < client_entry->auth_timestamp) {
-            if (loglevel_debug) {
-                snprintf(debug_msg, sizeof(debug_msg), 
-                    "Entry %zu timestamp %lld is older than auth_timestamp %lld - stopping scan", 
-                    i, (long long)timestamp, (long long)client_entry->auth_timestamp);
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                         client_entry->username ? client_entry->username : "unknown", 
-                         client_entry->ip_address ? client_entry->ip_address : "unknown",
-                         client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                }
-            break; // Stop here - no point checking older entries
-        }
-        
-        if (loglevel_debug) {
-            snprintf(debug_msg, sizeof(debug_msg), 
-                "After parsing: reason='%s', context='%s', username='%s', timestamp=%lld", 
-                reason[0] ? reason : "null", 
-                context[0] ? context : "null", 
-                username[0] ? username : "null", 
-                (long long)timestamp);
-            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                     client_entry->username ? client_entry->username : "unknown", 
-                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                     client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-        
-            snprintf(debug_msg, sizeof(debug_msg), 
-                "Checking condition: reason=%s, strcmp=%d, timestamp=%lld > 0", 
-                reason[0] ? reason : "NULL", 
-                reason[0] ? strcmp(reason, "auth") : -999,
-                (long long)timestamp);
-            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                     client_entry->username ? client_entry->username : "unknown", 
-                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                     client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-        }
-
-        // Check if this ACL LOG entry matches our auth attempt
-        if (reason[0] && strcmp(reason, "auth") == 0 && timestamp > 0) {
-            if (loglevel_debug) {
-                snprintf(debug_msg, sizeof(debug_msg), 
-                    "Found auth entry %zu: reason=%s, context=%s, username=%s, timestamp=%lld", 
-                    i, reason, context[0] ? context : "null", username[0] ? username : "null", (long long)timestamp);
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                         client_entry->username ? client_entry->username : "unknown", 
-                         client_entry->ip_address ? client_entry->ip_address : "unknown",
-                         client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-            }
-
-            // Ensure this is a toplevel auth failure (not from script/multi/module)
-            if (context[0] && strcmp(context, "toplevel") != 0) {
-                if (loglevel_debug) {
-                    snprintf(debug_msg, sizeof(debug_msg), "Skipping non-toplevel auth failure: %s", context);
-                    logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                             client_entry->username ? client_entry->username : "unknown", 
-                             client_entry->ip_address ? client_entry->ip_address : "unknown",
-                             client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                }
-                continue; // Skip non-toplevel auth failures
-            }
-            
-            // Check if the timestamp is close to our auth attempt (within 1 second for faster response)
-            mstime_t time_diff = (timestamp > client_entry->auth_timestamp) ? 
-                                (timestamp - client_entry->auth_timestamp) : 
-                                (client_entry->auth_timestamp - timestamp);
-            
-            if (loglevel_debug) {
-                snprintf(debug_msg, sizeof(debug_msg), 
-                    "Time difference: %lld ms (limit: 1000ms)", (long long)time_diff);
-                logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                         client_entry->username ? client_entry->username : "unknown", 
-                         client_entry->ip_address ? client_entry->ip_address : "unknown",
-                         client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-            }             
-
-            if (time_diff < 1000) {  // Within 1 second
-                // Check if client info contains our client ID or IP
-                if (client_info_log[0]) {
-                    char client_id_str[32];
-                    snprintf(client_id_str, sizeof(client_id_str), "id=%llu", 
-                            (unsigned long long)client_id);
-                    
-                    if (loglevel_debug) {
-                        snprintf(debug_msg, sizeof(debug_msg), 
-                            "Checking client match: looking for '%s' or '%s' in '%.200s'", 
-                            client_id_str, 
-                            client_entry->ip_address ? client_entry->ip_address : "null",
-                            client_info_log);
-                        logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                 client_entry->username ? client_entry->username : "unknown", 
-                                 client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                 client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                    }
-
-                    if (strstr(client_info_log, client_id_str) || 
-                        (client_entry->ip_address && strstr(client_info_log, client_entry->ip_address))) {
-                        found_client_match = 1;
-                        
-                        if (loglevel_debug) {
-                            snprintf(debug_msg, sizeof(debug_msg), "CLIENT MATCH FOUND!");
-                            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                     client_entry->username ? client_entry->username : "unknown", 
-                                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                     client_entry->client_port, EVENT_DEBUG);
-                            }
-                    } else {
-                        if (loglevel_debug) {
-                            snprintf(debug_msg, sizeof(debug_msg), "No client match found");
-                            logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                     client_entry->username ? client_entry->username : "unknown", 
-                                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                     client_entry->client_port, EVENT_DEBUG);
-                        }
-                    }
-                }
-                
-                if (found_client_match) {
-                    auth_failed = 1;
-                    snprintf(failure_reason, sizeof(failure_reason), 
-                            "-WRONGPASS invalid username-password pair or user is disabled. Context: %s, Client: %s, Username: %s, Count: %lld",
-                            context[0] ? context : "unknown", 
-                            client_entry->username ? client_entry->username : "unknown", 
-                            username[0] ? username : "unknown", 
-                            count);
-                    
-                    if (loglevel_debug) {
-                        snprintf(debug_msg, sizeof(debug_msg), "AUTH FAILURE DETECTED - breaking loop");
-                        logAuditEvent("DEBUG", "TIMER", debug_msg, 
-                                 client_entry->username ? client_entry->username : "unknown", 
-                                 client_entry->ip_address ? client_entry->ip_address : "unknown",
-                                 client_entry->client_port ? client_entry->client_port : 0, EVENT_DEBUG);
-                        }
-                    break;
-                }
-            }
-        }
-    }
-    
-    // Log the result
-    if (auth_failed) {
-        // Authentication failed
-        char audit_message[1024];
-        snprintf(audit_message, sizeof(audit_message),
-                "Authentication FAILED for client #%llu (%s:%d) - %s",
-                (unsigned long long)client_id, 
-                client_entry->ip_address ? client_entry->ip_address : "unknown",
-                client_entry->client_port,
-                "-WRONGPASS invalid username-password pair or user is disabled.");
-        
-        logAuditEvent("AUTH", "AUTH", audit_message, 
-                     actual_username[0] ? actual_username : 
-                     (client_entry->username ? client_entry->username : "unknown"), 
-                     (client_entry->ip_address ? client_entry->ip_address : "unknown"),
-                     client_entry->client_port ? client_entry->client_port : 0, EVENT_FAILURE);
-        
-        // Update client hash table with correct username
-        updateClientUsernameOnAuthFailure(ctx, client_id);
-    } else {
-        // No matching failure found in ACL LOG = AUTH SUCCEEDED
-        // (ACL LOG only contains failures, absence means success)
-        char audit_message[1024];
-        snprintf(audit_message, sizeof(audit_message),
-                "Authentication SUCCESS for username: %s from client #%llu (%s:%d)",
-                client_entry->username ? client_entry->username : "unknown",
-                (unsigned long long)client_id,
-                client_entry->ip_address ? client_entry->ip_address : "unknown",
-                client_entry->client_port);
-        
-        logAuditEvent("AUTH", "AUTH", audit_message, 
-                     client_entry->username ? client_entry->username : "unknown", 
-                     client_entry->ip_address ? client_entry->ip_address : "unknown",
-                     client_entry->client_port ? client_entry->client_port : 0, EVENT_SUCCESS);
-    }
-    
-cleanup:
-    if (reply) {
-        ValkeyModule_FreeCallReply(reply);
-    }
-    
-    // Free the client ID pointer using ValkeyModule_Free
-    ValkeyModule_Free(client_id_ptr);
-}
-
-// Create a timer to check auth result after a short delay
-int scheduleAuthResultCheck(ValkeyModuleCtx *ctx, uint64_t client_id) {
-    
-    // Allocate memory for client ID to pass to timer
-    uint64_t *client_id_ptr = ValkeyModule_Alloc(sizeof(uint64_t));
-    if (!client_id_ptr) {
-        return VALKEYMODULE_ERR;
-    }
-    
-    *client_id_ptr = client_id;
-    
-    // Create the timer
-    ValkeyModuleTimerID timer_id = ValkeyModule_CreateTimer(ctx, 
-                                                           config.auth_result_check_delay_ms,
-                                                           checkAuthResultTimer, 
-                                                           client_id_ptr);
-    
-    if (timer_id == 0) {
-        ValkeyModule_Free(client_id_ptr);
-        return VALKEYMODULE_ERR;
-    }
-    
-    return VALKEYMODULE_OK;
-}
-
 
 /////  Section for filtering functions /////
 // Initialize prefix filters
@@ -3390,32 +2955,6 @@ int setAuditBufferSize(const char *name, ValkeyModuleString *new_val, void *priv
     return VALKEYMODULE_OK;
 }
 
-long long getAuthResultCheckDelay(const char *name, void *privdata) {
-    VALKEYMODULE_NOT_USED(name);
-    VALKEYMODULE_NOT_USED(privdata);
-    
-    return (long long)config.auth_result_check_delay_ms;
-}
-
-int setAuthResultCheckDelay(const char *name, long long val, void *privdata, ValkeyModuleString **err) {
-    VALKEYMODULE_NOT_USED(name);
-    VALKEYMODULE_NOT_USED(privdata);
-    
-    if (val < 1 || val > 1000) {
-        *err = ValkeyModule_CreateString(NULL, "Auth result check delay must be between 1 and 1000 ms", -1);
-        return VALKEYMODULE_ERR;
-    }
-    
-    config.auth_result_check_delay_ms = (int)val;
-    char audit_msg[128];
-    snprintf(audit_msg, sizeof(audit_msg), "auth_result_check_delay_ms=%d", config.auth_result_check_delay_ms);
-    if (loglevel_debug) {
-        printf("Audit: %s\n", audit_msg);
-    }
-
-    return VALKEYMODULE_OK;
-}
-
 // Ignore internal clients setter and getter
 int getIgnoreInternalClients(const char *name, void *privdata) {
     VALKEYMODULE_NOT_USED(name);
@@ -3443,6 +2982,39 @@ int setIgnoreInternalClients(const char *name, int new_val, void *privdata, Valk
         }
         return VALKEYMODULE_OK;
     }
+}
+
+// Command result mode getter/setter
+ValkeyModuleString *getAuditCommandResultMode(const char *name, void *privdata) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    const char *modeString = (config.command_result_mode == RESULT_MODE_ALL) ? "all" : "failures";
+    return ValkeyModule_CreateString(NULL, modeString, strlen(modeString));
+}
+
+int setAuditCommandResultMode(const char *name, ValkeyModuleString *new_val, void *privdata, ValkeyModuleString **err) {
+    VALKEYMODULE_NOT_USED(name);
+    VALKEYMODULE_NOT_USED(privdata);
+    size_t len;
+    const char *mode = ValkeyModule_StringPtrLen(new_val, &len);
+
+    if (strcasecmp(mode, "all") == 0) {
+        config.command_result_mode = RESULT_MODE_ALL;
+        if (loglevel_debug) {
+            printf("Audit: command_result_mode set to ALL (requires module reload to subscribe to success events)\n");
+        }
+        return VALKEYMODULE_OK;
+    } else if (strcasecmp(mode, "failures") == 0) {
+        config.command_result_mode = RESULT_MODE_FAILURES;
+        if (loglevel_debug) {
+            printf("Audit: command_result_mode set to FAILURES\n");
+        }
+        return VALKEYMODULE_OK;
+    }
+
+    static const char err_msg[] = "Invalid command_result_mode. Use 'all' or 'failures'. Requires module reload to take full effect.";
+    *err = ValkeyModule_CreateString(NULL, err_msg, sizeof(err_msg) - 1);
+    return VALKEYMODULE_ERR;
 }
 
 // ===== audit.exclude_commands =====
@@ -3788,6 +3360,13 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
     char *temp_username = NULL;       // For tracking allocated memory
 
     if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) {
+        // Determine if client is internal using explicit flags (Valkey 9.1+).
+        // FAKE = server-internal pseudo-client; PRIMARY/REPLICA = replication connections.
+        // Fall back to "no entry in hash table" heuristic on older servers (flags will be 0).
+        int is_internal = (ci->flags & (VALKEYMODULE_CLIENTINFO_FLAG_FAKE |
+                                        VALKEYMODULE_CLIENTINFO_FLAG_PRIMARY |
+                                        VALKEYMODULE_CLIENTINFO_FLAG_REPLICA)) != 0;
+
         // Client connected - get and store username
         ValkeyModuleString *user_str = ValkeyModule_GetClientUserNameById(ctx, ci->id);
 
@@ -3808,11 +3387,12 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
             temp_username[user_len] = '\0'; // Null-terminate the copy
             username = temp_username;       // Use our copy for the audit message
 
-            // Check if client should be excluded from audit based on username and IP
-            int no_audit = isClientExcluded(username, ci->addr);
+            // Check if client should be excluded: explicit internal flag or exclusion rules
+            int no_audit = (config.ignore_internal_clients && is_internal)
+                           || isClientExcluded(username, ci->addr);
 
             // Store username and IP in hash table
-            storeClientInfo(ci->id, username, ci->addr, ci->port, no_audit, 0);
+            storeClientInfo(ci->id, username, ci->addr, ci->port, no_audit);
 
             ValkeyModule_FreeString(ctx, user_str);
         } else {
@@ -3828,7 +3408,8 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
             }
 
             // Store placeholder in hash table with IP address
-            storeClientInfo(ci->id, username, ci->addr, ci->port, 0, 0);
+            int no_audit = (config.ignore_internal_clients && is_internal);
+            storeClientInfo(ci->id, username, ci->addr, ci->port, no_audit);
         }
     } else if (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED) {
         // For disconnection, get the client info from the hash table
@@ -3854,17 +3435,8 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
 
     // Only log connection events if enabled and connections are in the event mask
     if (log_connection) {
-        // Format the audit message with username information
-        snprintf(buffer, sizeof(buffer),
-                 "client #%llu %s:%d using username: %s type %s",
-                 (unsigned long long)ci->id,
-                 ci->addr,
-                 ci->port,
-                 username,
-                 getClientTypeStr(ci)
-                );
-
-        logAuditEvent("CONNECTION", event_type, buffer, username, ci->addr, ci->port, EVENT_SUCCESS);
+        snprintf(buffer, sizeof(buffer), "type=%s", getClientTypeStr(ci));
+        logAuditEvent("CONNECTION", event_type, buffer, (unsigned long long)ci->id, username, ci->addr, ci->port, EVENT_SUCCESS);
     }
 
     // Clean up our temporary memory
@@ -3873,7 +3445,7 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
     }
 }
 
-int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username, 
+int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
                        ValkeyModuleString *password, ValkeyModuleString **err) {
 
     VALKEYMODULE_NOT_USED(password);
@@ -3888,10 +3460,9 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
     // Get client information
     uint64_t client_id = ValkeyModule_GetClientId(ctx);
     char client_info[256] = "unknown";
-    char client_ip[128] = "unknown"; 
+    char client_ip[128] = "unknown";
     int client_port = 0;
 
-    // Try to get client info
     ValkeyModuleClientInfo client = VALKEYMODULE_CLIENTINFO_INITIALIZER_V1;
     if (ValkeyModule_GetClientInfoById(&client, client_id) == VALKEYMODULE_OK) {
         snprintf(client_info, sizeof(client_info), "%s:%d", client.addr, client.port);
@@ -3899,56 +3470,95 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
         client_port = client.port;
     }
 
-    // Get current timestamp
-    mstime_t auth_timestamp = getCurrentTimestampMs();
-
-    // Format audit message for auth attempt
-    char buffer[1024];
-    snprintf(buffer, sizeof(buffer), 
-                "Authentication attempt for username: %s from client #%llu (%s)",
-                 username_str, (unsigned long long)client_id, client_info);
-
     // Log the auth attempt
-    logAuditEvent("AUTH", "AUTH", buffer, username_str, client_ip, client_port, EVENT_ATTEMPT);
+    logAuditEvent("AUTH", "AUTH", "password=<REDACTED>", (unsigned long long)client_id, username_str, client_ip, client_port, EVENT_ATTEMPT);
 
-    // Check if client should be excluded based on username and IP
+    // Store client info so the auth result callback can look it up
     int no_audit = isClientExcluded(username_str, client_ip);
-    
-    // Store client info with auth timestamp
-    storeClientInfo(client_id, username_str, client_ip, client_port, no_audit, auth_timestamp);
+    storeClientInfo(client_id, username_str, client_ip, client_port, no_audit);
 
-    // Schedule a timer to check the actual auth result
-    if (scheduleAuthResultCheck(ctx, client_id) != VALKEYMODULE_OK) {
-        // If timer creation fails, log an error
-        logAuditEvent("AUTH", "ERROR", "Failed to schedule auth result check", username_str, client_ip, client_port, EVENT_ERROR);
-    }
-
-    // delay to get auth result
-    usleep(config.auth_result_check_delay_ms * 1000 + 1); // Convert ms to us
-    // We're just logging, not making auth decisions, so pass through
+    // We're just logging, not making auth decisions
     return VALKEYMODULE_AUTH_NOT_HANDLED;
 }
 
-void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
+void authenticationAttemptCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent eid,
+                                    uint64_t subevent, void *data) {
+    VALKEYMODULE_NOT_USED(ctx);
+    VALKEYMODULE_NOT_USED(eid);
+    VALKEYMODULE_NOT_USED(subevent);
+
     if (config.enabled != 1) return;
-    
-    // Get command name - cache the result to avoid repeated calls
-    size_t cmd_len; 
-    const ValkeyModuleString *cmd_arg = ValkeyModule_CommandFilterArgGet(filter, 0);
-    if (cmd_arg == NULL) return;
-    
-    const char *cmd_str = ValkeyModule_StringPtrLen(cmd_arg, &cmd_len);
+
+    ValkeyModuleAuthenticationInfo *info = (ValkeyModuleAuthenticationInfo *)data;
+    if (info->version != VALKEYMODULE_AUTHENTICATION_INFO_VERSION) return;
+
+    // Look up stored client info for IP and port
+    ClientUsernameEntry *entry = getClientEntry(info->client_id);
+    if (entry && entry->no_audit) return;
+
+    const char *ip_address = entry ? entry->ip_address : "unknown";
+    int client_port = entry ? entry->client_port : 0;
+    const char *username = info->username ? info->username : "unknown";
+
+    int flag;
+
+    if (info->result == VALKEYMODULE_AUTH_RESULT_GRANTED) {
+        flag = EVENT_SUCCESS;
+    } else {
+        flag = EVENT_FAILURE;
+        /* Persist the attempted username into the global client table so that
+         * subsequent log entries for this connection reflect the name used in
+         * this failed AUTH, not a stale value from before the attempt. */
+        if (entry && info->username) {
+            if (entry->username) ValkeyModule_Free(entry->username);
+            entry->username = ValkeyModule_Strdup(info->username);
+        }
+    }
+
+    logAuditEvent("AUTH", "AUTH", "", (unsigned long long)info->client_id, username, ip_address, client_port, flag);
+}
+
+void commandResultCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent eid,
+                            uint64_t subevent, void *data) {
+    VALKEYMODULE_NOT_USED(ctx);
+
+    if (config.enabled != 1) return;
+
+    // Determine event type
+    int is_acl_rejected = (eid.id == VALKEYMODULE_EVENT_COMMAND_RESULT_ACL_REJECTED);
+    int is_rejected = (eid.id == VALKEYMODULE_EVENT_COMMAND_RESULT_REJECTED);
+    int is_failure = (eid.id == VALKEYMODULE_EVENT_COMMAND_RESULT_FAILURE);
+
+    // In failures-only mode, skip success events early (fast path)
+    if (!is_failure && !is_rejected && !is_acl_rejected && config.command_result_mode == RESULT_MODE_FAILURES) return;
+
+    ValkeyModuleCommandResultInfo *info = (ValkeyModuleCommandResultInfo *)data;
+
+    // Verify ABI version
+    if (info->version != VALKEYMODULE_COMMANDRESULTINFO_VERSION) return;
+
+    // Get command name - use canonical command_name (e.g. "CLIENT|LIST") if available,
+    // fall back to argv[0] for older server builds that don't populate it
+    const char *cmd_str;
+    size_t cmd_len;
+    if (info->command_name != NULL) {
+        cmd_str = info->command_name;
+        cmd_len = strlen(cmd_str);
+    } else {
+        if (info->argc < 1 || info->argv == NULL || info->argv[0] == NULL) return;
+        cmd_str = ValkeyModule_StringPtrLen(info->argv[0], &cmd_len);
+    }
 
     // Get client info
-    unsigned long long client = ValkeyModule_CommandFilterGetClientId(filter);
+    unsigned long long client = info->client_id;
     ClientUsernameEntry *entry = getClientEntry(client);
-    
-    // Init variables with defaults 
+
+    // Init variables with defaults
     char *username = "unknown";
     char *ip_address = "unknown";
     int client_port = 0;
     int client_no_audit = 0;
-    
+
     if (entry != NULL) {
         username = entry->username;
         ip_address = entry->ip_address;
@@ -3974,7 +3584,6 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
     int prefix_result = checkPrefixFilters(cmd_str, cmd_len, &prefix_category);
 
     if (cmd_info != NULL) {
-        //DBG fprintf(stderr, "AUDIT DEBUG | Command: %s, Category Value: %u\n", cmd_str, cmd_info->custom_category);
         effective_category = cmd_info->custom_category;
 
         if (effective_category != 0 && effective_category >= CATEGORY_USER_DEFINED_START) {
@@ -4005,202 +3614,217 @@ void commandLoggerCallback(ValkeyModuleCommandFilterCtx *filter) {
             return; // Skip audit
         }
     }
-    
-    
+
     // Resolve effective category if cmd_info lookup failed
     if (cmd_info == NULL) {
         if (prefix_category != 0) {
-            // Use category from prefix filter if hash table had no match
             effective_category = prefix_category;
         } else {
-            // Unknown command, default to OTHER
-            effective_category = EVENT_OTHER;
+            // For subcommands in "parent|sub" canonical form (e.g. "config|get"),
+            // fall back to the parent command's built-in category.
+            const char *pipe = memchr(cmd_str, '|', cmd_len);
+            if (pipe != NULL) {
+                effective_category = getBuiltinCategoryForCommand(cmd_str, (size_t)(pipe - cmd_str));
+            }
+            if (effective_category == 0) {
+                effective_category = EVENT_OTHER;
+            }
         }
     }
 
     // Early exit if client is excluded
-    // Optimized for: client_no_audit=true, is_config_cmd=false being most common
     if (client_no_audit) {
-        // Fast path: not a config command (most common)
         if (effective_category != EVENT_CONFIG) {
             audit_metrics_inc_exclusion();
-            return;  // Skip audit
+            return;
         }
-        // Slower path: is a config command, check if we must audit it
         if (!config.always_audit_config) {
             audit_metrics_inc_exclusion();
-            return;  // Skip audit
+            return;
         }
     }
-    
+
     // Set flag to force audit for config commands if configured
     int force_audit_config = (effective_category == EVENT_CONFIG && config.always_audit_config);
-    
+
     if (!force_audit_config) {
-        // Check prefix filter result
         if (prefix_result == FILTER_EXCLUDE) {
             audit_metrics_inc_exclusion();
             return;
         }
-        
-        // Check if command is explicitly excluded
         if (cmd_info != NULL) {
-            //DBG fprintf(stderr, "AUDIT DEBUG | FilterAction: %d \n", cmd_info->filter_action);
             if (cmd_info->filter_action == FILTER_EXCLUDE) {
                 audit_metrics_inc_exclusion();
                 return;
             }
         }
-        
-        // Check if this category is enabled in event mask
         if (!(config.event_mask & effective_category)) {
             audit_metrics_inc_exclusion();
             return;
         }
     }
 
-    // Get category name for logging 
+    // Get category name for logging
     category_str = getCategoryName(effective_category);
 
-    char details[2048];
-    char *details_ptr = details;
-    size_t remaining = sizeof(details) - 1; // Reserve space for null terminator
-    
-    // Helper macro for safe string appending
-    #define APPEND_TO_DETAILS(fmt, ...) do { \
-        int written = snprintf(details_ptr, remaining, fmt, __VA_ARGS__); \
-        if (written > 0 && (size_t)written < remaining) { \
-            details_ptr += written; \
-            remaining -= written; \
+    char command_args[2048];
+    char *args_ptr = command_args;
+    size_t args_remaining = sizeof(command_args) - 1;
+    *args_ptr = '\0';
+
+    char error_buf[512];
+    char *error_ptr = error_buf;
+    size_t error_remaining = sizeof(error_buf) - 1;
+    *error_ptr = '\0';
+
+    #define APPEND_TO_ARGS(fmt, ...) do { \
+        int written = snprintf(args_ptr, args_remaining, fmt, __VA_ARGS__); \
+        if (written > 0 && (size_t)written < args_remaining) { \
+            args_ptr += written; \
+            args_remaining -= written; \
         } else { \
-            remaining = 0; /* Buffer full, stop appending */ \
+            args_remaining = 0; \
         } \
     } while(0)
-    
-    #define APPEND_LITERAL(str) do { \
+
+    #define APPEND_ARG_LITERAL(str) do { \
         size_t len = strlen(str); \
-        if (len < remaining) { \
-            memcpy(details_ptr, str, len); \
-            details_ptr += len; \
-            remaining -= len; \
-            *details_ptr = '\0'; \
+        if (len < args_remaining) { \
+            memcpy(args_ptr, str, len); \
+            args_ptr += len; \
+            args_remaining -= len; \
+            *args_ptr = '\0'; \
         } else { \
-            remaining = 0; \
+            args_remaining = 0; \
         } \
     } while(0)
-    
-    // Initialize details buffer
-    *details_ptr = '\0';
-    
-    // Build client info efficiently
-    if (client && remaining > 0) {
-        APPEND_TO_DETAILS("client_id=%llu", client);
-    }
-    if (username && remaining > 0) {
-        APPEND_TO_DETAILS(" username=%s", username);
-    }
-    if (ip_address && remaining > 0) {
-        APPEND_TO_DETAILS(" ip=%s", ip_address);
-    }
-    
-    // Add command-specific details
-    if (effective_category == EVENT_CONFIG && remaining > 0) {
-        // CONFIG command - add subcommand and parameters
-        const ValkeyModuleString *subcmd_arg = ValkeyModule_CommandFilterArgGet(filter, 1);
-        if (subcmd_arg != NULL) {
+
+    #define APPEND_TO_ERROR(fmt, ...) do { \
+        int written = snprintf(error_ptr, error_remaining, fmt, __VA_ARGS__); \
+        if (written > 0 && (size_t)written < error_remaining) { \
+            error_ptr += written; \
+            error_remaining -= written; \
+        } else { \
+            error_remaining = 0; \
+        } \
+    } while(0)
+
+    // Build command-specific args (no client_id/username/ip — those are top-level fields)
+    if (effective_category == EVENT_CONFIG && args_remaining > 0) {
+        if (info->argc > 1 && info->argv[1] != NULL) {
             size_t subcmd_len;
-            const char *subcmd_str = ValkeyModule_StringPtrLen(subcmd_arg, &subcmd_len);
-            
-            APPEND_TO_DETAILS(" subcommand=%s", subcmd_str);
-            
-            // For GET/SET, add parameter - check length first for efficiency
-            if (remaining > 0 && subcmd_len == 3 && 
+            const char *subcmd_str = ValkeyModule_StringPtrLen(info->argv[1], &subcmd_len);
+
+            APPEND_TO_ARGS("subcommand=%s", subcmd_str);
+
+            if (args_remaining > 0 && subcmd_len == 3 &&
                 (strncasecmp(subcmd_str, "get", 3) == 0 || strncasecmp(subcmd_str, "set", 3) == 0)) {
-                const ValkeyModuleString *param_arg = ValkeyModule_CommandFilterArgGet(filter, 2);
-                if (param_arg != NULL) {
+                if (info->argc > 2 && info->argv[2] != NULL) {
                     size_t param_len;
-                    const char *param_str = ValkeyModule_StringPtrLen(param_arg, &param_len);
-                    APPEND_TO_DETAILS(" param=%s", param_str);
+                    const char *param_str = ValkeyModule_StringPtrLen(info->argv[2], &param_len);
+                    APPEND_TO_ARGS(" param=%s", param_str);
                 }
             }
         }
-    } 
-    else if (effective_category == EVENT_AUTH && remaining > 0) {
-        // AUTH command - redact password
-        APPEND_LITERAL(" password=<REDACTED>");
-    } 
-    else if (effective_category == EVENT_KEYS && cmd_info && remaining > 0) {
-        // KEY command - add key name
-        if (cmd_info->firstkey > 0) {
-            const ValkeyModuleString *key_arg = ValkeyModule_CommandFilterArgGet(filter, cmd_info->firstkey);
-            if (key_arg != NULL) {
-                size_t key_len;
-                const char *key_str = ValkeyModule_StringPtrLen(key_arg, &key_len);
-                APPEND_TO_DETAILS(" key=%s", key_str);
-            }
+    }
+    else if (effective_category == EVENT_AUTH && args_remaining > 0) {
+        APPEND_ARG_LITERAL("password=<REDACTED>");
+    }
+    else if (effective_category == EVENT_KEYS && cmd_info && args_remaining > 0) {
+        if (cmd_info->firstkey > 0 && cmd_info->firstkey < info->argc && info->argv[cmd_info->firstkey] != NULL) {
+            size_t key_len;
+            const char *key_str = ValkeyModule_StringPtrLen(info->argv[cmd_info->firstkey], &key_len);
+            APPEND_TO_ARGS("key=%s", key_str);
         }
-        
-        // Include payload if enabled and there's space
-        if (!config.disable_payload && remaining > 0 && cmd_info->firstkey > 0) {
+
+        if (!config.disable_payload && args_remaining > 0 && cmd_info->firstkey > 0) {
             int payload_idx = cmd_info->firstkey + 1;
-            const ValkeyModuleString *payload_arg = ValkeyModule_CommandFilterArgGet(filter, payload_idx);
-            
-            if (payload_arg != NULL) {
+            if (payload_idx < info->argc && info->argv[payload_idx] != NULL) {
                 size_t payload_len;
-                const char *payload_str = ValkeyModule_StringPtrLen(payload_arg, &payload_len);
-                
-                // Limit payload size
+                const char *payload_str = ValkeyModule_StringPtrLen(info->argv[payload_idx], &payload_len);
+
                 size_t max_payload = config.max_payload_size;
                 if (payload_len > max_payload) {
                     payload_len = max_payload;
                 }
-                
+
                 if (payload_len > 0) {
-                    APPEND_TO_DETAILS(" payload=%.*s", (int)payload_len, payload_str);
-                    
-                    // Add truncation indicator if needed
-                    if (payload_len == max_payload && remaining > 0) {
-                        APPEND_LITERAL("...(truncated)");
+                    APPEND_TO_ARGS(" payload=%.*s", (int)payload_len, payload_str);
+                    if (payload_len == max_payload && args_remaining > 0) {
+                        APPEND_ARG_LITERAL("...(truncated)");
                     }
                 }
             }
         }
-    } 
-    else if (remaining > 0) {
-        // OTHER command or custom category - add first few arguments
-        int argc = ValkeyModule_CommandFilterArgsCount(filter);
+    }
+    else if (args_remaining > 0) {
         int max_args_to_log = 3;
-        
-        for (int i = 1; i < argc && i <= max_args_to_log && remaining > 0; i++) {
-            const ValkeyModuleString *arg = ValkeyModule_CommandFilterArgGet(filter, i);
-            if (arg != NULL) {
+        int first_arg = 1;
+
+        for (int i = 1; i < info->argc && i <= max_args_to_log && args_remaining > 0; i++) {
+            if (info->argv[i] != NULL) {
                 size_t arg_len;
-                const char *arg_str = ValkeyModule_StringPtrLen(arg, &arg_len);
-                
-                // Limit argument length
+                const char *arg_str = ValkeyModule_StringPtrLen(info->argv[i], &arg_len);
+
                 size_t max_arg_len = 50;
+                const char *sep = first_arg ? "" : " ";
+                first_arg = 0;
                 if (arg_len > max_arg_len) {
-                    APPEND_TO_DETAILS(" arg%d=%.50s...", i, arg_str);
+                    APPEND_TO_ARGS("%sarg%d=%.50s...", sep, i, arg_str);
                 } else {
-                    APPEND_TO_DETAILS(" arg%d=%.*s", i, (int)arg_len, arg_str);
+                    APPEND_TO_ARGS("%sarg%d=%.*s", sep, i, (int)arg_len, arg_str);
                 }
             }
         }
-        
-        // Indicate additional arguments
-        if (argc > max_args_to_log + 1 && remaining > 0) {
-            APPEND_TO_DETAILS(" (and %d more args)", argc - max_args_to_log - 1);
+
+        if (info->argc > max_args_to_log + 1 && args_remaining > 0) {
+            APPEND_TO_ARGS(" (and %d more args)", info->argc - max_args_to_log - 1);
         }
     }
 
-    #undef APPEND_TO_DETAILS
-    #undef APPEND_LITERAL
-    
-    // Ensure null termination
-    details[sizeof(details) - 1] = '\0';
-    
-    // Log the audit event
-    logAuditEvent(category_str, cmd_str, details, username, ip_address, client_port, EVENT_EXECUTE);
+    #undef APPEND_TO_ARGS
+    #undef APPEND_ARG_LITERAL
+    #undef APPEND_TO_ERROR
+
+    command_args[sizeof(command_args) - 1] = '\0';
+
+    int flag;
+    if (is_acl_rejected) {
+        flag = EVENT_FAILURE;
+        // subevent reuses ValkeyModuleACLLogEntryReason values (0=AUTH,1=CMD,2=KEY,3=CHANNEL,4=DB)
+        const char *reason_str = "unknown";
+        switch ((int)subevent) {
+            case VALKEYMODULE_ACL_LOG_AUTH:    reason_str = "auth"; break;
+            case VALKEYMODULE_ACL_LOG_CMD:     reason_str = "command"; break;
+            case VALKEYMODULE_ACL_LOG_KEY:     reason_str = "key"; break;
+            case VALKEYMODULE_ACL_LOG_CHANNEL: reason_str = "channel"; break;
+            case VALKEYMODULE_ACL_LOG_DB:      reason_str = "db"; break;
+        }
+        if (error_remaining > 0) {
+            int written = snprintf(error_ptr, error_remaining, "acl_deny_reason=%s", reason_str);
+            if (written > 0 && (size_t)written < error_remaining) {
+                error_ptr += written;
+                error_remaining -= written;
+            }
+        }
+        // rejection_context carries key/channel name for ACL_LOG_KEY and ACL_LOG_CHANNEL
+        if (info->rejection_context != NULL && error_remaining > 0) {
+            snprintf(error_ptr, error_remaining, " acl_object=%s", info->rejection_context);
+        }
+        error_buf[sizeof(error_buf) - 1] = '\0';
+        // Override category to AUTH for ACL rejected events
+        category_str = getCategoryName(EVENT_AUTH);
+    } else if (is_rejected) {
+        flag = EVENT_FAILURE;
+        // rejection_context is the full error reply string sent to the client
+        if (info->rejection_context != NULL && error_remaining > 0) {
+            snprintf(error_ptr, error_remaining, "rejected=%s", info->rejection_context);
+        }
+        error_buf[sizeof(error_buf) - 1] = '\0';
+    } else {
+        flag = is_failure ? EVENT_FAILURE : EVENT_SUCCESS;
+    }
+    logAuditEventFull(category_str, cmd_str, command_args, client, username, ip_address, client_port, flag, info->duration_us, info->dirty, error_buf);
 }
 
 // to be removed
@@ -4230,7 +3854,6 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
     config.tcp_max_retries = 3;             // Retry 3 times by default
     config.tcp_reconnect_on_failure = 1;    // Enable automatic reconnection
     config.tcp_buffer_on_disconnect = 1;    // Buffer logs during disconnection
-    config.auth_result_check_delay_ms = 10; // 10 milliseconds delay for auth result check
 
     // Process module arguments if any
     for (int i = 0; i < argc; i++) {
@@ -4491,6 +4114,19 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                 config.ignore_internal_clients = 0;
             } else {
                 ValkeyModule_Log(ctx, "warning", "Unknown value for ignore_internal_clients '%s', using default", ignore_internal);
+            }
+        }
+        // Handle command_result_mode argument
+        else if (i < argc-1 && strcasecmp(arg, "command_result_mode") == 0) {
+            const char *mode = ValkeyModule_StringPtrLen(argv[i+1], NULL);
+            i++;
+
+            if (strcasecmp(mode, "all") == 0) {
+                config.command_result_mode = RESULT_MODE_ALL;
+            } else if (strcasecmp(mode, "failures") == 0) {
+                config.command_result_mode = RESULT_MODE_FAILURES;
+            } else {
+                ValkeyModule_Log(ctx, "warning", "Unknown value for command_result_mode '%s', using default 'failures'", mode);
             }
         }
     }
@@ -4768,20 +4404,18 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
         return VALKEYMODULE_ERR;
     }
 
-    // Register auth result check delay configuration
-    if (ValkeyModule_RegisterNumericConfig(ctx, "auth_result_check_delay_ms", config.auth_result_check_delay_ms,
+    // Register ignore flag for internal clients
+    if (ValkeyModule_RegisterBoolConfig(ctx, "ignore_internal_clients", config.ignore_internal_clients,
             VALKEYMODULE_CONFIG_DEFAULT,
-            1,            // Minimum 1ms
-            1000,         // Maximum 1 seconds (adjust as needed)
-            getAuthResultCheckDelay, setAuthResultCheckDelay, 
+            getIgnoreInternalClients, setIgnoreInternalClients,
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
 
-    // Register ignore flag for internal clients
-    if (ValkeyModule_RegisterBoolConfig(ctx, "ignore_internal_clients", config.ignore_internal_clients, 
+    // Register command_result_mode config
+    if (ValkeyModule_RegisterStringConfig(ctx, "command_result_mode", "failures",
             VALKEYMODULE_CONFIG_DEFAULT,
-            getIgnoreInternalClients, setIgnoreInternalClients, 
+            getAuditCommandResultMode, setAuditCommandResultMode,
             NULL, NULL) == VALKEYMODULE_ERR) {
         return VALKEYMODULE_ERR;
     }
@@ -4840,10 +4474,61 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     // Register the auth callback
     ValkeyModule_RegisterAuthCallback(ctx, authLoggerCallback);
 
-    // Register our command filter callback
-    if ((filter = ValkeyModule_RegisterCommandFilter(ctx, commandLoggerCallback, 
-        VALKEYMODULE_CMDFILTER_NOSELF))== NULL) 
-        return VALKEYMODULE_ERR;    
+    // Subscribe to authentication attempt events for success/failure outcomes
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+        ValkeyModuleEvent_AuthenticationAttempt, authenticationAttemptCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning",
+            "Authentication attempt events not supported by this server. "
+            "Auth success/failure auditing may be limited.");
+    } else {
+        ValkeyModule_Log(ctx, "notice", "Subscribed to authentication attempt events");
+    }
+
+    // Subscribe to command result events (requires Valkey server with commandresult API)
+    // Always subscribe to failure events by default.
+    // Only subscribe to success events when command_result_mode=all to avoid
+    // server-side overhead of preparing event data for every successful command.
+    // Changing command_result_mode from failures to all requires the module reloaded to take full effect.
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+        ValkeyModuleEvent_CommandResultFailure, commandResultCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning",
+            "Command result failure events not supported by this server. "
+            "Command result auditing disabled.");
+    } else {
+        ValkeyModule_Log(ctx, "notice", "Subscribed to command result failure events");
+    }
+
+    if (config.command_result_mode == RESULT_MODE_ALL) {
+        if (ValkeyModule_SubscribeToServerEvent(ctx,
+            ValkeyModuleEvent_CommandResultSuccess, commandResultCallback) == VALKEYMODULE_ERR) {
+            ValkeyModule_Log(ctx, "warning",
+                "Command result success events not supported by this server.");
+        } else {
+            ValkeyModule_Log(ctx, "notice", "Subscribed to command result success events");
+        }
+    } else {
+        ValkeyModule_Log(ctx, "notice",
+            "command_result_mode=failures: not subscribing to success events (zero overhead). "
+            "Set command_result_mode=all and reload module to audit successful commands.");
+    }
+
+    // Subscribe to non-ACL rejected events (OOM, NOSCRIPT, NOMULTI, etc.)
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+        ValkeyModuleEvent_CommandResultRejected, commandResultCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning",
+            "Command result rejected events not supported by this server.");
+    } else {
+        ValkeyModule_Log(ctx, "notice", "Subscribed to command result rejected events");
+    }
+
+    // Subscribe to ACL rejected events (NOPERM rejections)
+    if (ValkeyModule_SubscribeToServerEvent(ctx,
+        ValkeyModuleEvent_CommandResultACLRejected, commandResultCallback) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning",
+            "Command result ACL rejected events not supported by this server.");
+    } else {
+        ValkeyModule_Log(ctx, "notice", "Subscribed to command result ACL rejected events");
+    }
 
     return VALKEYMODULE_OK;
 

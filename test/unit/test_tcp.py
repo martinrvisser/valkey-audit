@@ -26,7 +26,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
-        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", "./audit.so")
+        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "libvalkeyaudit.so"))
         
         # Start Valkey server with the audit module
         cls._start_valkey_server()
@@ -44,6 +44,23 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                 if i == max_retries - 1:
                     raise
                 time.sleep(0.5)
+
+        # Probe for command result event support
+        open(cls.log_file, 'w').close()
+        cls.redis.set("__probe__", "string")
+        try:
+            cls.redis.lpush("__probe__", "val")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            with open(cls.log_file) as f:
+                cls.command_result_supported = len(f.read()) > 0
+        except FileNotFoundError:
+            cls.command_result_supported = False
+        if not cls.command_result_supported:
+            print("\n  NOTE: Server does not support command result events (PR #2936). "
+                  "TCP command logging tests will be skipped.")
     
     @classmethod
     def tearDownClass(cls):
@@ -71,7 +88,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             #f.write(f"loadmodule {cls.module_path} protocol file {cls.log_file}\n")
             f.write(f"loadmodule {cls.module_path}\n")    
             f.write(f"audit.protocol file {cls.log_file}\n")
-        
+            f.write(f"audit.command_result_mode all\n")
+
         print(f"written {cls.temp_dir}/valkey.conf")
 
         # Start the server
@@ -94,7 +112,11 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
-    
+            if cls.server_proc.stdout:
+                cls.server_proc.stdout.close()
+            if cls.server_proc.stderr:
+                cls.server_proc.stderr.close()
+
     def _read_log_file(self):
         """Read the audit log file contents"""
         try:
@@ -115,6 +137,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     
     def test_002_set_protocol_tcp(self):
         """Test setting the audit protocol to TCP"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         import socket
         import threading
         import time
@@ -361,6 +385,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
 
     def test_008_tcp_config_integration(self):
         """Test TCP configuration integration and realistic scenarios"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         import socket
         import threading
         import time

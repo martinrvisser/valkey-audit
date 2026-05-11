@@ -19,16 +19,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
-include(FetchContent)
-FetchContent_Declare(
-    valkey
-    GIT_REPOSITORY https://github.com/valkey-io/valkey.git
-    GIT_TAG        8.0.2
-)
-FetchContent_MakeAvailable(valkey)
-
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include)
-configure_file(${FETCHCONTENT_BASE_DIR}/valkey-src/src/valkeymodule.h ${CMAKE_CURRENT_BINARY_DIR}/include COPYONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/test/valkey.conf ${CMAKE_CURRENT_BINARY_DIR} COPYONLY)
 
 # CHANGED: Conditional flags based on build type
@@ -51,7 +41,6 @@ add_library(valkeyaudit SHARED ${SOURCES})
 
 target_include_directories(valkeyaudit PRIVATE
     src
-    ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
 target_link_libraries(valkeyaudit PRIVATE Threads::Threads)

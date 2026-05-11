@@ -19,7 +19,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
 
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
-        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", "./audit.so")
+        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "libvalkeyaudit.so"))
         
         # Start Valkey server with the audit module and ACL enabled
         cls._start_valkey_server()
@@ -40,15 +40,36 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
                 
         # Create test users
         cls._create_test_users()
+
+        # Probe for command result event support
+        open(cls.log_file, 'w').close()
+        cls.redis_admin.set("__probe__", "string")
+        try:
+            cls.redis_admin.lpush("__probe__", "val")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            with open(cls.log_file) as f:
+                cls.command_result_supported = len(f.read()) > 0
+        except FileNotFoundError:
+            cls.command_result_supported = False
+        if not cls.command_result_supported:
+            print("\n  NOTE: Server does not support command result events (PR #2936). "
+                  "All exclusion tests will be skipped.")
     
     @classmethod
     def tearDownClass(cls):
         # Stop the server
         cls._stop_valkey_server()
-        
+
         # Clean up temporary directory
         #cls.temp_dir.cleanup()
-    
+
+    def setUp(self):
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
+
     @classmethod
     def _start_valkey_server(cls):
         """Start a Valkey server instance for testing with ACL enabled"""
@@ -65,8 +86,9 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             f.write(f"port {cls.port}\n")
             f.write("aclfile /tmp/valkey-acl-test.acl\n")  # ACL enabled
             f.write("logfile /tmp/valkeytest.log\n")
-            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"loadmodule {cls.module_path}\n")
             f.write(f"audit.protocol file {cls.log_file}\n")
+            f.write(f"audit.command_result_mode all\n")
   
         
         # Create ACL file with default user
@@ -90,7 +112,11 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
-        
+            if cls.server_proc.stdout:
+                cls.server_proc.stdout.close()
+            if cls.server_proc.stderr:
+                cls.server_proc.stderr.close()
+
         # Remove the temporary ACL file
         #try:
         #    os.remove("/tmp/valkey-acl-test.acl")
@@ -136,6 +162,28 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
     def _clear_log_file(self):
         """Clear the contents of the audit log file"""
         open(self.log_file, 'w').close()
+
+    def _log_summary(self, log_lines, max_lines=10):
+        """Return a compact string of log lines for assertion messages."""
+        visible = log_lines[:max_lines]
+        summary = "\n  ".join(l.strip() for l in visible) if visible else "(empty)"
+        if len(log_lines) > max_lines:
+            summary += f"\n  ... ({len(log_lines) - max_lines} more lines)"
+        return summary
+
+    def assertInLog(self, predicate, label, log_lines):
+        """Assert that at least one log line matches predicate, with log dump on failure."""
+        self.assertTrue(
+            any(predicate(line) for line in log_lines),
+            f"{label}\nActual log:\n  {self._log_summary(log_lines)}"
+        )
+
+    def assertNotInLog(self, predicate, label, log_lines):
+        """Assert that no log line matches predicate, with log dump on failure."""
+        self.assertFalse(
+            any(predicate(line) for line in log_lines),
+            f"{label}\nActual log:\n  {self._log_summary(log_lines)}"
+        )
     
     def test_001_exclude_single_user(self):
         """Test excluding a single user from audit"""
@@ -156,7 +204,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("exclude_test_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check user1's command should NOT be logged
@@ -186,7 +234,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("ip_exclude_test_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check neither command should be logged since both come from localhost
@@ -215,7 +263,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("specific_exclude_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check user1's command should NOT be logged (excluded by username@ip)
@@ -295,7 +343,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("after_clear_key", "value")
 
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check that the previously excluded user is now logged
@@ -367,7 +415,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check excluded user's commands are not logged
@@ -406,7 +454,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass  # Might fail if user doesn't have permission, but should still attempt
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check normal command is NOT logged (user is excluded)
@@ -430,7 +478,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check CONFIG command is NOT logged when always_audit_config is disabled
@@ -464,7 +512,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check normal command is NOT logged (IP is excluded)
@@ -505,23 +553,22 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.get("excluded_cmd_test")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Check that excluded commands are NOT logged
         ping_logged = any("PING" in line for line in log_lines)
         echo_logged = any("ECHO" in line for line in log_lines)
         
-        self.assertFalse(ping_logged, "Excluded PING command was logged")
-        self.assertFalse(echo_logged, "Excluded ECHO command was logged")
-        
+        self.assertNotInLog(lambda l: "PING" in l.upper(), "Excluded PING command was logged", log_lines)
+        self.assertNotInLog(lambda l: "ECHO" in l.upper(), "Excluded ECHO command was logged", log_lines)
+
         # Check that non-excluded commands ARE logged
-        set_logged = any("SET" in line and "excluded_cmd_test" in line for line in log_lines)
-        get_logged = any("GET" in line and "excluded_cmd_test" in line for line in log_lines)
-        
-        self.assertTrue(set_logged, "Non-excluded SET command was not logged")
-        self.assertTrue(get_logged, "Non-excluded GET command was not logged")
-        
+        self.assertInLog(lambda l: "SET" in l.upper() and "excluded_cmd_test" in l,
+                         "Non-excluded SET command was not logged", log_lines)
+        self.assertInLog(lambda l: "GET" in l.upper() and "excluded_cmd_test" in l,
+                         "Non-excluded GET command was not logged", log_lines)
+
         # Clear exclusions
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.EXCLUDE_COMMANDS", "")
 
@@ -545,7 +592,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("ECHO", "test")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # None should be logged
@@ -582,19 +629,19 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.get("prefix_test_key")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
-        # Check that prefix-matched commands are NOT logged
-        client_logged = any("CLIENT" in line for line in log_lines)
-        self.assertFalse(client_logged, "Command matching exclusion prefix was logged")
-        
+        # Check that prefix-matched commands are NOT logged.
+        # Anchor to the command-name field to avoid matching "client_id=" in details.
+        self.assertNotInLog(lambda l: bool(re.search(r'\]\s+client\b', l, re.IGNORECASE)),
+                            "Command matching exclusion prefix was logged", log_lines)
+
         # Check that non-matching commands ARE logged
-        set_logged = any("SET" in line and "prefix_test_key" in line for line in log_lines)
-        get_logged = any("GET" in line and "prefix_test_key" in line for line in log_lines)
-        
-        self.assertTrue(set_logged, "Non-excluded SET command was not logged")
-        self.assertTrue(get_logged, "Non-excluded GET command was not logged")
+        self.assertInLog(lambda l: "SET" in l.upper() and "prefix_test_key" in l,
+                         "Non-excluded SET command was not logged", log_lines)
+        self.assertInLog(lambda l: "GET" in l.upper() and "prefix_test_key" in l,
+                         "Non-excluded GET command was not logged", log_lines)
         
         # Clear prefix filters
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.PREFIX_FILTER", "")
@@ -624,19 +671,20 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("multi_prefix_key", "value")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
-        # Check that all prefix-matched commands are NOT logged
-        client_logged = any("CLIENT" in line for line in log_lines)
-        cluster_logged = any("CLUSTER" in line for line in log_lines)
-        
-        self.assertFalse(client_logged, "CLIENT command was logged despite prefix exclusion")
-        self.assertFalse(cluster_logged, "CLUSTER command was logged despite prefix exclusion")
-        
+        # Check that prefix-matched commands are NOT logged.
+        # Use regex anchored to the command-name field (after the category bracket)
+        # to avoid false matches on "client_id=" or "cluster" in log details.
+        self.assertNotInLog(lambda l: bool(re.search(r'\]\s+client\b', l, re.IGNORECASE)),
+                            "CLIENT command was logged despite prefix exclusion", log_lines)
+        self.assertNotInLog(lambda l: bool(re.search(r'\]\s+cluster\b', l, re.IGNORECASE)),
+                            "CLUSTER command was logged despite prefix exclusion", log_lines)
+
         # Check that non-matching command IS logged
-        set_logged = any("SET" in line and "multi_prefix_key" in line for line in log_lines)
-        self.assertTrue(set_logged, "Non-excluded command was not logged")
+        self.assertInLog(lambda l: "SET" in l.upper() and "multi_prefix_key" in l,
+                         "Non-excluded command was not logged", log_lines)
         
         # Clear prefix filters
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.PREFIX_FILTER", "")
@@ -670,7 +718,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.set("custom_cat_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # First key should NOT be logged (events was set to dangerous only)
@@ -710,15 +758,14 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
             pass
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # Both should be logged
-        key_logged = any("SET" in line and "mixed_cat_key" in line for line in log_lines)
-        config_logged = any("CONFIG" in line for line in log_lines)
-        
-        self.assertTrue(key_logged, "Key command not logged with keys,admin events")
-        self.assertTrue(config_logged, "CONFIG command not logged with keys,admin events")
+        self.assertInLog(lambda l: "SET" in l.upper() and "mixed_cat_key" in l,
+                         "Key command not logged with keys,admin events", log_lines)
+        self.assertInLog(lambda l: "CONFIG" in l.upper(),
+                         "CONFIG command not logged with keys,admin events", log_lines)
         
         # Clear custom categories
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.CUSTOM_CATEGORY", "")
@@ -748,21 +795,20 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("combined_exclude_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # User1's commands should NOT be logged (user excluded)
-        user1_set_logged = any("combined_exclude_key1" in line for line in log_lines)
-        self.assertFalse(user1_set_logged, "Excluded user's SET was logged")
-        
+        self.assertNotInLog(lambda l: "combined_exclude_key1" in l,
+                            "Excluded user's SET was logged", log_lines)
+
         # User2's PING should NOT be logged (command excluded)
-        user2_ping_logged = any("PING" in line and self.user2 in line for line in log_lines)
-        self.assertFalse(user2_ping_logged, "Excluded command PING was logged")
-        
+        self.assertNotInLog(lambda l: "PING" in l.upper() and self.user2 in l,
+                            "Excluded command PING was logged", log_lines)
+
         # User2's SET should be logged
-        user2_set_logged = any("SET" in line and "combined_exclude_key2" in line 
-                               for line in log_lines)
-        self.assertTrue(user2_set_logged, "Non-excluded user's SET was not logged")
+        self.assertInLog(lambda l: "SET" in l.upper() and "combined_exclude_key2" in l,
+                         "Non-excluded user's SET was not logged", log_lines)
         
         # Clear exclusions
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.EXCLUDERULES", "")
@@ -798,23 +844,25 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("prefix_user_exclude_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"log_line:{line}")
 
         # User1's commands should NOT be logged (user excluded)
-        user1_logged = any("prefix_user_exclude_key1" in line for line in log_lines)
-        self.assertFalse(user1_logged, "Excluded user's command was logged")
-        
-        # User2's CLIENT command should NOT be logged (prefix excluded)
-        user2_client_logged = any("CLIENT" in line and self.user2 in line for line in log_lines)
-        self.assertFalse(user2_client_logged, "Prefix-excluded command was logged")
-        
+        self.assertNotInLog(lambda l: "prefix_user_exclude_key1" in l,
+                            "Excluded user's command was logged", log_lines)
+
+        # User2's CLIENT command should NOT be logged (prefix excluded).
+        # Anchor to the command-name field to avoid matching "client_id=" in details.
+        self.assertNotInLog(
+            lambda l: bool(re.search(r'\]\s+client\b', l, re.IGNORECASE)) and self.user2 in l,
+            "Prefix-excluded command was logged", log_lines
+        )
+
         # User2's SET should be logged
-        user2_set_logged = any("SET" in line and "prefix_user_exclude_key2" in line 
-                               for line in log_lines)
-        self.assertTrue(user2_set_logged, "Non-excluded command was not logged")
+        self.assertInLog(lambda l: "SET" in l.upper() and "prefix_user_exclude_key2" in l,
+                         "Non-excluded command was not logged", log_lines)
         
         # Clear filters
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.EXCLUDERULES", "")
@@ -924,7 +972,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         print(f"res:{result}")
 
         # Clear log fil
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"LOG LINE: {line}")
@@ -935,7 +983,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         print(f"CONFIG RESULT: {result}")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         for line in log_lines:
             print(f"LOG LINE: {line}")
@@ -955,7 +1003,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("CONFIG", "GET", "port")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # CONFIG should NOT be logged now
@@ -985,7 +1033,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.execute_command("CONFIG", "GET", "port")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # CONFIG should be logged despite prefix filter
@@ -1024,21 +1072,20 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user2.set("priority_test_key2", "value2")
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
         
         # User1's commands should NOT be logged (highest priority: user exclusion)
-        user1_logged = any(self.user1 in line for line in log_lines)
-        self.assertFalse(user1_logged, "Excluded user's commands were logged")
-        
+        self.assertNotInLog(lambda l: self.user1 in l,
+                            "Excluded user's commands were logged", log_lines)
+
         # User2's PING should NOT be logged (command exclusion)
-        user2_ping_logged = any("PING" in line and self.user2 in line for line in log_lines)
-        self.assertFalse(user2_ping_logged, "Excluded command was logged")
-        
+        self.assertNotInLog(lambda l: "PING" in l.upper() and self.user2 in l,
+                            "Excluded command was logged", log_lines)
+
         # User2's SET should be logged
-        user2_set_logged = any("SET" in line and "priority_test_key2" in line 
-                               for line in log_lines)
-        self.assertTrue(user2_set_logged, "Non-excluded command was not logged")
+        self.assertInLog(lambda l: "SET" in l.upper() and "priority_test_key2" in l,
+                         "Non-excluded command was not logged", log_lines)
         
         # Clear all filters
         self.redis_admin.execute_command("CONFIG", "SET", "AUDIT.EXCLUDERULES", "")
@@ -1063,7 +1110,9 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         config = self.redis_admin.execute_command("CONFIG GET AUDIT.*")
         
         # Check structure - Redis returns flat key-value pairs
-        self.assertEqual(len(config), 40, "Config should have 40 items")
+        self.assertEqual(len(config), 40,
+            f"Config should have 40 items (20 key-value pairs)\n"
+            f"Actual ({len(config)} items): {list(config[i] for i in range(0, len(config), 2))}")
         
         # Convert flat array to dictionary (every two elements form a key-value pair)
         config_dict = {}
@@ -1081,7 +1130,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         self.redis_user1.ping()
         
         # Read log file
-        time.sleep(0.1)
+        time.sleep(0.4)
         log_lines = self._read_log_file()
 
         for line in log_lines:

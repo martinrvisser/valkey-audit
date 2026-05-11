@@ -38,9 +38,10 @@ Available parameters:
 - `audit.protocol [file|syslog|tcp]`: Logging protocol to use. 
     When using the file protocol it should be followed by the filepath.
     When using the syslog protocol it should be followed by the syslog facility.
-    When using the syslog protocol it should be followed by the double quoted host:port string.
+    When using the tcp protocol it should be followed by the double quoted host:port string.
 - `audit.format [text|json|csv]`: Log format.
 - `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys,other,none,all).
+- `audit.command_result_mode [all|failures]`: Whether to log all commands (`all`) or only commands that fail or are rejected (`failures`). Default is `failures`.
 - `audit.payload_disable`: Disable logging command payloads.
 - `audit.payload_maxsize [size]`: Maximum payload size to log in bytes.
 - `audit.excluderules`: Specific usernames and/or IP addresses to exclude from auditing.
@@ -51,7 +52,6 @@ Available parameters:
 - `audit.tcp_max_retries`: maximum number of retries to establish a TCP connection.
 - `audit.tcp_buffer_on_disconnect`: buffer messages during disconnected state from target TCP destination.
 - `audit.tcp_reconnect_on_failure`: automatic reconnect to TCP destination on failure.
-- `audit.auth_result_check_delay_ms`: delay in milliseconds to delay checking for auth success
 - `audit.ignore_internal_clients` : do not audit internal clients like replication clients
 
 
@@ -108,6 +108,26 @@ Available event categories:
 - `config`: Configuration commands
 - `keys`: Key operations
 - `other`: Operations that are not config and are not key operations
+
+### command_result_mode
+
+Controls which command executions produce an audit log entry.
+
+```
+CONFIG SET AUDIT.COMMAND_RESULT_MODE failures  # default
+CONFIG SET AUDIT.COMMAND_RESULT_MODE all
+```
+
+**`failures` (default)** — logs only commands that did not complete successfully:
+- Commands that executed but returned an error (e.g. `WRONGTYPE`, out-of-range index)
+- Commands rejected before execution: wrong argument count, unknown command, OOM, read-only replica, busy script, etc.
+- ACL rejections: `NOPERM` (command, key, channel, or database) and `NOAUTH`
+
+Successful command executions produce no log entry. The server performs an O(1) listener-count check and skips all event preparation for successful commands, so there is zero per-command overhead for clean traffic.
+
+**`all`** — additionally logs every successful command execution. Equivalent in coverage to the pre-execution command filter approach, with the added benefit of capturing actual execution outcome, duration, and keys modified.
+
+Note: this setting takes effect at module load time. Changing it at runtime updates the stored value but the active event subscription does not change until the module is reloaded.
 
 ### payload
 
@@ -238,36 +258,65 @@ Requirements:
   
 To do: automation
 
-## Logged Events
+## Log Output Format
 
-### Connection Events
+Every audit log entry contains the following fields regardless of format:
 
-Example in text format:
+| Field | Description |
+|---|---|
+| `timestamp` | Local time in `YYYY-MM-DD HH:MM:SS` |
+| `category` | Event category: `CONNECTION`, `AUTH`, `CONFIG`, `KEY_OP`, `OTHER` |
+| `command` | Command name as reported by the server (e.g. `set`, `config\|get`) |
+| `command_args` | Command-specific arguments (see below) |
+| `result` | Outcome: `SUCCESS`, `FAILURE`, `ATTEMPT` |
+| `duration_us` | Execution time in microseconds |
+| `keys_modified` | Number of keys modified (0 for reads and failures) |
+| `client_id` | Numeric Valkey client ID |
+| `username` | Authenticated username |
+| `client_ip` | Client IP address |
+| `client_port` | Client TCP port |
+| `server_hostname` | Hostname of the Valkey server |
+| `error` | Populated only for rejected events: `rejected=<msg>` or `acl_deny_reason=<reason> acl_object=<name>` |
+
+### command_args by category
+
+| Category | Contents |
+|---|---|
+| `KEY_OP` | `key=<key> [payload=<value>]` |
+| `CONFIG` | `subcommand=<GET\|SET> [param=<name>]` |
+| `AUTH` | `password=<REDACTED>` |
+| `OTHER` | `arg1=<val> [arg2=<val>] [arg3=<val>]` |
+| `CONNECTION` | `type=<connection-type>` |
+
+### Text format
+
 ```
-[2025-04-15 14:30:22] [CONNECTION] CONNECTED client_id=16
-[2025-04-15 14:35:15] [CONNECTION] DISCONNECTED client_id=16
+[2026-01-21 09:54:07] [KEY_OP] set result=SUCCESS duration_us=6 keys_modified=1 client_id=4 username=default client_ip=127.0.0.1:30414 server_hostname=myserver key=user:1001 payload=hello
+[2026-01-21 09:54:08] [KEY_OP] lpush result=FAILURE duration_us=12 keys_modified=0 client_id=4 username=default client_ip=127.0.0.1:30414 server_hostname=myserver key=mystring
+[2026-01-21 09:54:09] [AUTH] set result=FAILURE duration_us=3 keys_modified=0 client_id=5 username=keyuser client_ip=127.0.0.1:30415 server_hostname=myserver key=forbidden:key acl_deny_reason=key acl_object=forbidden:key
+[2026-01-21 09:54:10] [CONNECTION] connection result=SUCCESS duration_us=0 keys_modified=0 client_id=16 username=default client_ip=127.0.0.1:30416 server_hostname=myserver type=normal
+[2026-01-21 09:54:11] [AUTH] AUTH result=ATTEMPT duration_us=0 keys_modified=0 client_id=16 username=alice client_ip=127.0.0.1:30416 server_hostname=myserver password=<REDACTED>
+[2026-01-21 09:54:12] [CONFIG] config|get result=SUCCESS duration_us=45 keys_modified=0 client_id=4 username=default client_ip=127.0.0.1:30414 server_hostname=myserver subcommand=GET param=maxmemory
 ```
 
-### Authentication Events
+### JSON format
 
-Example in text format (password is always redacted):
-```
-[2025-04-15 14:30:25] [AUTH] ATTEMPT password=<REDACTED>
-```
+Each entry is a single-line JSON object:
 
-### Configuration Commands
-
-Example in text format:
-```
-[2025-04-15 14:32:10] [CONFIG] GET param=port
-[2025-04-15 14:33:05] [CONFIG] SET param=maxclients
+```json
+{"timestamp":"2026-01-21 09:54:07","category":"KEY_OP","command":"set","command_args":"key=user:1001 payload=hello","result":"SUCCESS","duration_us":6,"keys_modified":1,"client_id":4,"username":"default","client_ip":"127.0.0.1","client_port":30414,"server_hostname":"myserver","error":""}
+{"timestamp":"2026-01-21 09:54:08","category":"KEY_OP","command":"lpush","command_args":"key=mystring","result":"FAILURE","duration_us":12,"keys_modified":0,"client_id":4,"username":"default","client_ip":"127.0.0.1","client_port":30414,"server_hostname":"myserver","error":""}
+{"timestamp":"2026-01-21 09:54:09","category":"AUTH","command":"set","command_args":"key=forbidden:key","result":"FAILURE","duration_us":3,"keys_modified":0,"client_id":5,"username":"keyuser","client_ip":"127.0.0.1","client_port":30415,"server_hostname":"myserver","error":"acl_deny_reason=key acl_object=forbidden:key"}
 ```
 
-### Key Operations
+### CSV format
 
-Example in text format:
+Columns (13 total): `timestamp`, `category`, `command`, `command_args`, `result`, `duration_us`, `keys_modified`, `client_id`, `username`, `client_ip`, `client_port`, `server_hostname`, `error`. Commas within a field are escaped with a backslash.
+
 ```
-[2025-04-15 14:31:18] [KEY_OP] SET key=user:1001 payload={"name":"John","email":"john@example.com"}
+2026-01-21 09:54:07,KEY_OP,set,key=user:1001 payload=hello,SUCCESS,6,1,4,default,127.0.0.1,30414,myserver,
+2026-01-21 09:54:08,KEY_OP,lpush,key=mystring,FAILURE,12,0,4,default,127.0.0.1,30414,myserver,
+2026-01-21 09:54:09,AUTH,set,key=forbidden:key,FAILURE,3,0,5,keyuser,127.0.0.1,30415,myserver,acl_deny_reason=key acl_object=forbidden:key
 ```
 
 ## License

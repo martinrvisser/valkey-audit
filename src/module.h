@@ -34,6 +34,10 @@
 #define FILTER_AUDIT     0    // Audit this command
 #define FILTER_EXCLUDE   1    // Exclude from auditing
 
+// Command result subscription modes
+#define RESULT_MODE_ALL      0  // Subscribe to both success and failure events
+#define RESULT_MODE_FAILURES 1  // Subscribe to failure events only (zero success overhead)
+
 #define AUDIT_LOG_BUFFER_SIZE (1*1024*1024)   // 1MB buffer
 #define AUDIT_LOG_FLUSH_INTERVAL 1000         // Flush every 1000ms
 
@@ -53,9 +57,9 @@ typedef struct AuditConfig {
     int syslog_facility;
     int syslog_priority;
     int always_audit_config;
-    int auth_result_check_delay_ms; // Delay for auth result check in milliseconds
     int ignore_internal_clients; // New flag to ignore internal clients
-    
+    int command_result_mode;        // RESULT_MODE_ALL or RESULT_MODE_FAILURES
+
     /* TCP-specific settings */
     char *tcp_host;
     int tcp_port;
@@ -92,7 +96,6 @@ typedef struct ClientUsernameEntry {
     char *ip_address;
     int no_audit; // indicator if the user's commands should not be logged
     int client_port;
-    mstime_t auth_timestamp; // Timestamp when auth attempt was made (0 if no auth)
     struct ClientUsernameEntry *next;
 } ClientUsernameEntry;
 

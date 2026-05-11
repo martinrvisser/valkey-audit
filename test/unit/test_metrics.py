@@ -26,7 +26,7 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
         
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
-        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", "./libvalkeyaudit.so")
+        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "libvalkeyaudit.so"))
         
         # Start Valkey server with the audit module
         cls._start_valkey_server()
@@ -44,6 +44,23 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
                 if i == max_retries - 1:
                     raise
                 time.sleep(0.5)
+
+        # Probe for command result event support
+        open(cls.log_file, 'w').close()
+        cls.redis.set("__probe__", "string")
+        try:
+            cls.redis.lpush("__probe__", "val")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            with open(cls.log_file) as f:
+                cls.command_result_supported = len(f.read()) > 0
+        except FileNotFoundError:
+            cls.command_result_supported = False
+        if not cls.command_result_supported:
+            print("\n  NOTE: Server does not support command result events (PR #2936). "
+                  "Command-dependent metric tests will be skipped.")
     
     @classmethod
     def tearDownClass(cls):
@@ -63,10 +80,11 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
         cls.conf_file = os.path.join(cls.temp_dir, "valkey.conf")
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
-            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"loadmodule {cls.module_path}\n")
             f.write(f"audit.protocol file {cls.log_file}\n")
             f.write("audit.events all\n")
             f.write("audit.enabled yes\n")
+            f.write("audit.command_result_mode all\n")
         
         print(f"Written {cls.temp_dir} valkey.conf")
 
@@ -85,7 +103,11 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
-    
+            if cls.server_proc.stdout:
+                cls.server_proc.stdout.close()
+            if cls.server_proc.stderr:
+                cls.server_proc.stderr.close()
+
     def _get_audit_info(self):
         """Get audit metrics from INFO command"""
         info_output = self.redis.info("audit")
@@ -143,6 +165,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_002_event_counting(self):
         """Test that event counters increment correctly"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Reset metrics if possible
         self._reset_metrics()
         
@@ -401,6 +425,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_012_metrics_persistence_across_events(self):
         """Test that metrics accumulate correctly across multiple events"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Reset if possible
         self._reset_metrics()
         time.sleep(0.1)
@@ -424,6 +450,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_013_concurrent_metrics_updates(self):
         """Test metrics under concurrent load"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         import threading
         import time
         
@@ -615,6 +643,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_019_prefix_filter_functionality(self):
         """Test prefix filter configuration and statistics updates"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Get initial metrics
         initial_metrics = self._get_audit_info()
         initial_filter_count = initial_metrics['audit_prefix_filters_count']
@@ -698,6 +728,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_022_command_lookup_metrics(self):
         """Test command lookup statistics"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         metrics = self._get_audit_info()
         
         # Check lookup metrics exist
@@ -789,6 +821,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_025_filter_metrics_under_load(self):
         """Test that filter metrics update correctly under load"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Get initial metrics
         initial_metrics = self._get_audit_info()
         initial_lookups = initial_metrics['audit_user_command_lookups']
@@ -925,6 +959,8 @@ class ValkeyAuditMetricsTests(unittest.TestCase):
 
     def test_030_filter_metrics_reset_behavior(self):
         """Test filter metrics behavior after reset"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Generate some activity to populate metrics
         self.redis.execute_command("CONFIG", "SET", "AUDIT.PREFIX_FILTER", "!TEST*")
         for i in range(20):

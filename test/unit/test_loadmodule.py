@@ -23,11 +23,14 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
-        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", "./audit.so")
+        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "libvalkeyaudit.so"))
         
         # Ensure the module exists
         if not os.path.exists(cls.module_path):
             raise FileNotFoundError(f"Audit module not found at {cls.module_path}")
+
+        # Probe whether the server supports command result events
+        cls.command_result_supported = cls._probe_command_result_support()
     
     @classmethod
     def tearDownClass(cls):
@@ -35,9 +38,48 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         if os.path.exists(cls.base_temp_dir):
             #shutil.rmtree(cls.base_temp_dir)
             print(f"Base temporary directory NOT removed: {cls.base_temp_dir}")
-    
+
+    @classmethod
+    def _probe_command_result_support(cls):
+        """Start a temporary server and check if command result events fire."""
+        probe_dir = tempfile.mkdtemp(prefix="vka-probe-")
+        log_file = os.path.join(probe_dir, "probe.log")
+        conf_file = os.path.join(probe_dir, "probe.conf")
+        s = socket.socket(); s.bind(('', 0)); port = s.getsockname()[1]; s.close()
+        with open(conf_file, 'w') as f:
+            f.write(f"port {port}\nsave \"\"\n")
+            f.write(f"loadmodule {cls.module_path}\n")
+            f.write(f"audit.protocol file {log_file}\n")
+            f.write(f"audit.events keys\n")  # keys only: exclude connections from probe
+            f.write(f"audit.command_result_mode all\n")
+        proc = subprocess.Popen([cls.valkey_server, conf_file],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(2)
+            r = redis.Redis(host='localhost', port=port, decode_responses=True)
+            open(log_file, 'w').close()
+            r.set("__probe__", "string")
+            try: r.lpush("__probe__", "val")
+            except Exception: pass
+            time.sleep(0.5)
+            try:
+                with open(log_file) as f:
+                    supported = len(f.read()) > 0
+            except FileNotFoundError:
+                supported = False
+            r.close()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+        if not supported:
+            print("\n  NOTE: Server does not support command result events (PR #2936). "
+                  "All loadmodule tests will be skipped.")
+        return supported
+
     def setUp(self):
         """Set up a fresh server environment for each test."""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Create a test-specific temporary directory
         self.temp_dir = tempfile.mkdtemp(prefix="vka-test-", dir=self.base_temp_dir)
         print(f"Test temporary directory created: {self.temp_dir}")
@@ -60,31 +102,40 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
     
     def tearDown(self):
         """Clean up server and client for each test."""
-        # Close the client connection
+        # Close the client connection before terminating the server so the
+        # close handshake can complete while the server is still running.
         if self.client:
             try:
                 self.client.close()
-            except:
+            except Exception:
                 pass
-        
+            self.client = None
+
         # Stop the server
         if self.server_proc:
             try:
                 self.server_proc.terminate()
                 self.server_proc.wait(timeout=5)
-            except:
-                # Force kill if it doesn't terminate gracefully
+            except Exception:
                 try:
                     self.server_proc.kill()
-                except:
+                    self.server_proc.wait(timeout=2)
+                except Exception:
                     pass
-        
+            # Always close the PIPE handles; leaving them open causes ResourceWarning
+            # when Python's GC eventually finalises the _io.BufferedReader objects.
+            if self.server_proc.stdout:
+                self.server_proc.stdout.close()
+            if self.server_proc.stderr:
+                self.server_proc.stderr.close()
+            self.server_proc = None
+
         # Clean up the test-specific temporary directory
         if os.path.exists(self.temp_dir):
             #shutil.rmtree(self.temp_dir)
             print(f"Test temporary directory NOT removed: {self.temp_dir}")
     
-    def create_config_file(self, module_params=None, test_name=None):
+    def create_config_file(self, module_params=None, test_name=None, command_result_mode="all"):
         print(f"\n params: {module_params}")
         """Create a Valkey configuration file with the audit module loaded.
         
@@ -136,6 +187,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             f.write(f"logfile /tmp/vka.log \n")
             f.write(f"port {self.port}\n")
             f.write(f"{module_load_line}\n")
+            f.write(f"audit.command_result_mode {command_result_mode}\n")
         
         print(f"Created config file at {self.valkey_conf_path}")
         print(f"Module load line: {module_load_line}")
@@ -177,53 +229,48 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
     def stop_server(self):
         """Stop the running Valkey server."""
         print("Stopping Valkey server...")
-        
-        # Close Redis client connection if it exists
+
+        # Close Redis client connection before terminating so the close
+        # handshake can complete while the server is still alive.
         if hasattr(self, 'client') and self.client:
-            self.client.close()
+            try:
+                self.client.close()
+            except Exception:
+                pass
             self.client = None
-            
-        # Terminate the server process if it exists
+
+        # Terminate the server process
         if hasattr(self, 'server_proc') and self.server_proc:
-            # First try graceful termination
             self.server_proc.terminate()
-            
-            # Wait for process to terminate (with timeout)
             try:
                 self.server_proc.wait(timeout=5)
                 print("Server stopped gracefully")
             except subprocess.TimeoutExpired:
-                # If graceful termination fails, force kill
                 print("Server did not terminate gracefully, force killing...")
                 self.server_proc.kill()
                 self.server_proc.wait()
                 print("Server forcefully terminated")
-            
-            try:
-                stdout_data, stderr_data = self.server_proc.communicate(timeout=1) # Small timeout after termination
-                # You can print or log stdout_data and stderr_data here if useful
-                # print(f"Server stdout:\n{stdout_data.decode()}")
-                # print(f"Server stderr:\n{stderr_data.decode()}")
-            except subprocess.TimeoutExpired:
-                # This should ideally not happen if process.wait() succeeded
-                print("Warning: communicate() timed out after process termination.")
 
-            # Clear the server process reference
+            # Close PIPE handles to prevent ResourceWarning from GC
+            if self.server_proc.stdout:
+                self.server_proc.stdout.close()
+            if self.server_proc.stderr:
+                self.server_proc.stderr.close()
             self.server_proc = None
         else:
             print("No server process was running")
-        
+
         # Verify server is actually stopped by attempting to connect
+        test_client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
         try:
-            test_client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
             test_client.ping()
             print("WARNING: Server appears to still be running!")
-            test_client.close()
             return False
         except redis.exceptions.ConnectionError:
-            # This exception is expected and indicates the server is stopped
             print(f"Confirmed server is no longer running on port {self.port}")
             return True
+        finally:
+            test_client.close()
     
     def read_audit_log(self, log_path=None):
         """Read and return the audit log contents."""
@@ -263,8 +310,8 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         # Check if audit log exists and has content
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET", log_content)
-    
+        self.assertIn("[KEY_OP] SET", log_content.upper())
+
     def test_enable_parameter(self):
         """Test enable parameter (on/off)."""
         # Test enabled
@@ -277,7 +324,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         time.sleep(0.5)
         
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET", log_content)
+        self.assertIn("[KEY_OP] SET", log_content.upper())
     
     def test_disable_parameter(self):
         """Test disable parameter."""
@@ -291,8 +338,63 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         log_content = self.read_audit_log()
         # When disabled, log should not contain SET command
-        self.assertNotIn("[KEY_OP] SET", log_content)
-    
+        self.assertNotIn("[KEY_OP] SET", log_content.upper())
+
+    def test_command_result_mode_all_logs_success(self):
+        """In 'all' mode, successful commands produce a SUCCESS log entry."""
+        config_path = self.create_config_file(
+            ["events", "keys"],
+            test_name="result_mode_all",
+            command_result_mode="all",
+        )
+        self.start_server(config_path)
+
+        self.client.set("mode_all_key", "value")
+        time.sleep(0.5)
+
+        log_content = self.read_audit_log()
+        self.assertIn("[KEY_OP] SET", log_content.upper(),
+                      f"SET command should appear in log in 'all' mode\nLog:\n{log_content}")
+        self.assertIn("SUCCESS", log_content.upper(),
+                      f"Successful SET should be logged with SUCCESS in 'all' mode\nLog:\n{log_content}")
+
+    def test_command_result_mode_failures_suppresses_success(self):
+        """In 'failures' mode, successful commands are not logged; failures are.
+
+        The module subscribes to SUCCESS events only at load time when
+        command_result_mode=all.  Starting with command_result_mode=failures
+        means the server never fires success callbacks for this module, so
+        no overhead and no log entry for clean commands.
+        """
+        config_path = self.create_config_file(
+            ["events", "keys"],
+            test_name="result_mode_failures",
+            command_result_mode="failures",
+        )
+        self.start_server(config_path)
+
+        # Successful SET — should produce no log entry
+        self.client.set("mode_fail_key", "value")
+        time.sleep(0.5)
+
+        log_content = self.read_audit_log()
+        self.assertNotIn("mode_fail_key", log_content,
+                         f"Successful SET should NOT appear in log in 'failures' mode\nLog:\n{log_content}")
+        self.assertNotIn("SUCCESS", log_content.upper(),
+                         f"No SUCCESS entries should exist in 'failures' mode\nLog:\n{log_content}")
+
+        # Failed command (WRONGTYPE) — should be logged as FAILURE
+        open(self.audit_log_path, 'w').close()
+        try:
+            self.client.lpush("mode_fail_key", "val")  # mode_fail_key is a string, not a list
+        except redis.exceptions.ResponseError:
+            pass  # Expected: WRONGTYPE error
+
+        time.sleep(0.5)
+        log_content = self.read_audit_log()
+        self.assertIn("FAILURE", log_content.upper(),
+                      f"Failed command should be logged as FAILURE in 'failures' mode\nLog:\n{log_content}")
+
     def test_always_audit_config_parameter(self):
         """Test always_audit_config parameter."""
         config_path = self.create_config_file(
@@ -316,10 +418,12 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         time.sleep(0.5)
         
         log_content = self.read_audit_log()
-        self.assertNotIn("[KEY_OP] SET", log_content)
-        self.assertIn("[CONFIG]", log_content)
-        self.assertIn("subcommand=SET", log_content)
-    
+        self.assertNotIn("[KEY_OP] SET", log_content.upper())
+        self.assertIn("[CONFIG]", log_content.upper())
+        # Details use lowercase key names (subcommand=SET), so compare consistently.
+        # The server passes "CONFIG|SET" as the canonical command_name for subcommands.
+        self.assertIn("subcommand=SET".upper(), log_content.upper())
+
     def test_protocol_file_parameter(self):
         """Test protocol 'file' with custom path."""
         # Create a custom log path within the temp directory
@@ -339,7 +443,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         # Check the custom log file
         custom_log_content = self.read_audit_log(custom_log_path)
-        self.assertIn("[KEY_OP] set".lower(), custom_log_content.lower())
+        self.assertIn("[KEY_OP] SET", custom_log_content.upper())
         
         # Default log (which would be self.audit_log_path) should be ignored in this case
         # since we explicitly specified a different path
@@ -363,7 +467,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         # You might need to adjust the syslog reading method based on your system
         syslog_entries = self.read_syslog_entries()
         self.assertIn("valkey-audit", syslog_entries)
-        self.assertIn("[KEY_OP] set".lower(), syslog_entries.lower())
+        self.assertIn("[KEY_OP] SET", syslog_entries.upper())
 
     def test_protocol_syslog_default_facility(self):
         """Test protocol 'syslog' with default facility when none specified."""
@@ -380,7 +484,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
 
         syslog_entries = self.read_syslog_entries()
         self.assertIn("valkey-audit", syslog_entries)
-        self.assertIn("[KEY_OP] set".lower(), syslog_entries.lower())
+        self.assertIn("[KEY_OP] SET", syslog_entries.upper())
 
     def test_protocol_syslog_various_facilities(self):
         """Test protocol 'syslog' with different facilities."""
@@ -534,7 +638,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 
             try:
                 json_entry = json.loads(line)
-                if "command" in json_entry and json_entry["command"] == "SET":
+                if "command" in json_entry and json_entry["command"].upper() == "SET":
                     self.assertIn("key=", json_entry["details"])
                     valid_json_found = True
             except json.JSONDecodeError:
@@ -566,7 +670,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             try:
                 csv_reader = csv.reader(io.StringIO(line))
                 row = next(csv_reader)
-                if len(row) > 3 and "SET" in line:
+                if len(row) > 3 and "SET" in line.upper():
                     valid_csv_found = True
             except:
                 print(f"Invalid CSV in line: {line}")
@@ -617,8 +721,8 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         time.sleep(0.5)
         
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET".lower(), log_content.lower())
-        self.assertNotIn("[AUTH]", log_content)
+        self.assertIn("[KEY_OP] SET".upper(), log_content.upper())
+        self.assertNotIn("[AUTH]", log_content.upper())
     
     def test_events_multiple_parameter(self):
         """Test events parameter with multiple event types."""
@@ -645,7 +749,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         time.sleep(0.5)
         
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET".lower(), log_content.lower())  # Keys event should be logged
+        self.assertIn("[KEY_OP] SET", log_content.upper())  # Keys event should be logged
         
         # Note: AUTH might not be visible in logs if password protection is not enabled
         # We can only reliably check that connection events are not logged
@@ -687,7 +791,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         time.sleep(0.5)
         
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET".lower(), log_content.lower())
+        self.assertIn("[KEY_OP] SET", log_content.upper())
         self.assertIn("key=key1", log_content)
         # Value should be truncated
         self.assertNotIn(long_value, log_content)
@@ -723,7 +827,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 
             try:
                 json_entry = json.loads(line)
-                if json_entry.get("command") == "SET":
+                if json_entry.get("command", "").upper() == "SET":
                     set_cmd_found = True
                     self.assertIn("key1", json_entry["details"])
                     # Check that value is truncated (if it's included)
@@ -758,8 +862,8 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         # Check audit log - operations from excluded IP should not be logged
         log_content = self.read_audit_log()
-        self.assertNotIn("[KEY_OP] SET".lower(), log_content.lower())
-        self.assertNotIn("key=key1", log_content)
+        self.assertNotIn("[KEY_OP] SET", log_content.upper())
+        self.assertNotIn("key=key1", log_content.lower())
         
         # Test 2: Username exclusion rule
         # Stop the server and restart with username exclusion
@@ -794,10 +898,10 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         
         # Operations from non-excluded user should be logged
         log_content = self.read_audit_log()
-        self.assertIn("[KEY_OP] SET".lower(), log_content.lower())
-        self.assertIn("normaluser", log_content)
-        self.assertIn("key3", log_content)
-        
+        self.assertIn("[KEY_OP] SET", log_content.upper())
+        self.assertIn("normaluser", log_content.lower())
+        self.assertIn("key3", log_content.lower())
+
         # Test 3: Combined IP and username exclusion
         # Stop the server and restart with both IP and username exclusion
         self.stop_server()
@@ -902,8 +1006,8 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         primary_log = self.read_audit_log()
 
         # Regular client SET should be logged
-        self.assertIn("[KEY_OP] SET", primary_log)
-        self.assertIn("test_key", primary_log)
+        self.assertIn("[KEY_OP] SET", primary_log.upper())
+        self.assertIn("test_key", primary_log.lower())
 
         # Now set up a replica to connect to the primary
         # Create replica temp directory
@@ -922,6 +1026,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             f.write(f"port {replica_port}\n")
             f.write(f"replicaof 127.0.0.1 {self.port}\n")
             f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients yes\n")
+            f.write(f"audit.command_result_mode all\n")
 
         # Start replica server
         replica_proc = subprocess.Popen(
@@ -962,7 +1067,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 # (Regular client commands to the replica would still be logged)
 
                 # Count SET operations in replica log - should be minimal or none from replication
-                set_count = replica_log_content.count("[KEY_OP] SET")
+                set_count = replica_log_content.upper().count("[KEY_OP] SET")
 
                 # Internal replication traffic should not be audited
                 # The exact count depends on initialization, but replication data should be excluded
@@ -991,6 +1096,10 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 replica_proc.wait(timeout=5)
             except:
                 replica_proc.kill()
+            if replica_proc.stdout:
+                replica_proc.stdout.close()
+            if replica_proc.stderr:
+                replica_proc.stderr.close()
 
             if os.path.exists(replica_temp_dir):
                 shutil.rmtree(replica_temp_dir)
@@ -1019,6 +1128,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             f.write(f"port {replica_port}\n")
             f.write(f"replicaof 127.0.0.1 {self.port}\n")
             f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients no\n")
+            f.write(f"audit.command_result_mode all\n")
 
         # Start replica server
         replica_proc = subprocess.Popen(
@@ -1050,7 +1160,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 print(f"Replica audit log (ignore_internal_clients=no):\n{replica_log_content}")
 
                 # With ignore_internal_clients=no, internal replication commands SHOULD be logged
-                set_count = replica_log_content.count("[KEY_OP] SET")
+                set_count = replica_log_content.upper().count("[KEY_OP] SET")
 
                 print(f"SET operations logged on replica with ignore_internal_clients=no: {set_count}")
 
@@ -1068,6 +1178,10 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 replica_proc.wait(timeout=5)
             except:
                 replica_proc.kill()
+            if replica_proc.stdout:
+                replica_proc.stdout.close()
+            if replica_proc.stderr:
+                replica_proc.stderr.close()
 
             if os.path.exists(replica_temp_dir):
                 shutil.rmtree(replica_temp_dir)

@@ -1,6 +1,17 @@
 .vscode
 .cache
+_deps
+backup
+CMakeFiles
 build
 **/__pycache__
 test/unit/dump.rdb
 test/unit/audit.log
+test/integration
+rocky8
+rocky9
+src/bck
+src/bck2
+ubuntu
+src/test_hash_collision.py
+lib

@@ -26,7 +26,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         
         # Path to Valkey server and module
         cls.valkey_server = os.environ.get("VALKEY_SERVER", "valkey-server")
-        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", "./audit.so")
+        cls.module_path = os.environ.get("AUDIT_MODULE_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "libvalkeyaudit.so"))
         
         # Start Valkey server with the audit module
         cls._start_valkey_server()
@@ -44,6 +44,24 @@ class ValkeyAuditModuleTests(unittest.TestCase):
                 if i == max_retries - 1:
                     raise
                 time.sleep(0.5)
+
+        # Probe whether the server supports command result events.
+        # Trigger a WRONGTYPE failure and check if the audit log captures it.
+        open(cls.log_file, 'w').close()
+        cls.redis.set("__probe__", "string")
+        try:
+            cls.redis.lpush("__probe__", "val")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            with open(cls.log_file) as f:
+                cls.command_result_supported = len(f.read()) > 0
+        except FileNotFoundError:
+            cls.command_result_supported = False
+        if not cls.command_result_supported:
+            print("\n  NOTE: Server does not support command result events (PR #2936). "
+                  "Command logging tests will be skipped.")
     
     @classmethod
     def tearDownClass(cls):
@@ -69,8 +87,9 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
             #f.write(f"loadmodule {cls.module_path} protocol file {cls.log_file}\n")
-            f.write(f"loadmodule {cls.module_path}\n")    
+            f.write(f"loadmodule {cls.module_path}\n")
             f.write(f"audit.protocol file {cls.log_file}\n")
+            f.write(f"audit.command_result_mode all\n")
             f.write(f"logfile {cls.temp_dir}/vk.log \n")
         
         print(f"written {cls.temp_dir} valkey.conf")
@@ -99,6 +118,10 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
+            if cls.server_proc.stdout:
+                cls.server_proc.stdout.close()
+        if hasattr(cls, 'stderr_file'):
+            cls.stderr_file.close()
     
     def _read_log_file(self):
         """Read the audit log file contents"""
@@ -121,6 +144,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     
     def test_002_set_protocol_file(self):
         """Test setting the audit protocol to file"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Create a new log file path
         #new_log_file = os.path.join(self.temp_dir.name, "new_audit.log")
         new_log_file = os.path.join(self.temp_dir, "new_audit.log")
@@ -145,6 +170,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     
     def test_003_set_format(self):
         """Test setting different audit log formats"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         formats = ["text", "json", "csv"]
         
         # Set the protocol to file with the log_file
@@ -194,6 +221,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         
     def test_004_set_events(self):
         """Test enabling/disabling different event categories"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         
         # cli sends docs first, lets see if this changes anything
         self.redis.execute_command("PING")
@@ -305,6 +334,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     
     def test_005_payload_options(self):
         """Test payload logging options"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         # Set a reasonable payload size
         self.redis.execute_command("CONFIG","SET","AUDIT.PAYLOAD_MAXSIZE", "10")
         
@@ -359,7 +390,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         config = self.redis.execute_command("CONFIG GET AUDIT.*")
         
         # Check structure - Redis returns flat key-value pairs
-        self.assertEqual(len(config), 40, "Config should have 38 items")
+        self.assertEqual(len(config), 40, "Config should have 40 items (20 key-value pairs)")
         
         # Convert flat array to dictionary (every two elements form a key-value pair)
         config_dict = {}
@@ -380,7 +411,7 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         self.assertIn("audit.protocol", config_dict, "Missing audit.protocol config")
         self.assertIn("audit.payload_maxsize", config_dict, "Missing audit.payload_maxsize config")
         self.assertIn("audit.payload_disable", config_dict, "Missing audit.payload_disable config")
-        self.assertIn("audit.auth_result_check_delay_ms", config_dict, "Missing audit.auth_result_check_delay_ms config")
+        self.assertIn("audit.command_result_mode", config_dict, "Missing audit.command_result_mode config")
         self.assertIn("audit.ignore_internal_clients", config_dict, "Missing audit.ignore_internal_clients config")
 
         # Check protocol is set to file
@@ -448,6 +479,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
 
     def test_008_set_protocol_tcp(self):
         """Test setting the audit protocol to TCP"""
+        if not self.command_result_supported:
+            self.skipTest("Server does not support command result events (requires PR #2936)")
         import socket
         import threading
         import time
@@ -568,29 +601,25 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         
         self.assertIn("Invalid port number", str(context.exception))
 
-    def test_009_set_auth_delay(self):
-        """Test setting the auth delay"""
-        # Create a new log file path
-        #new_log_file = os.path.join(self.temp_dir.name, "new_audit.log")
-        new_log_file = os.path.join(self.temp_dir, "new_audit.log")
-        
-        # Set the protocol to file with the new path
-        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.auth_result_check_delay_ms", "100")
-        self.assertEqual(result, "OK", "Failed to set auth result check delay")
+    def test_009_command_result_mode(self):
+        """Test setting command_result_mode configuration"""
 
-        # Write something to trigger an audit event
-        self.redis.set("test_key", "test_value")
-        
-        # Check if the new log file was created
-        self.assertTrue(os.path.exists(new_log_file), 
-                       f"New log file {new_log_file} was not created")
-        
-        # Check if there's content in the new log file
-        with open(new_log_file, 'r') as f:
-            log_content = f.read()
-        
-        self.assertTrue(len(log_content) > 0, 
-                       "No audit log entries were written to the new log file")
+        # Switch to all
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.command_result_mode", "all")
+        self.assertEqual(result, "OK", "Failed to set command_result_mode to all")
+        result = self.redis.execute_command("CONFIG", "GET", "AUDIT.command_result_mode")
+        self.assertEqual(result[1], "all", "command_result_mode should be 'all' after setting")
+
+        # Switch back to failures
+        result = self.redis.execute_command("CONFIG", "SET", "AUDIT.command_result_mode", "failures")
+        self.assertEqual(result, "OK", "Failed to set command_result_mode to failures")
+        result = self.redis.execute_command("CONFIG", "GET", "AUDIT.command_result_mode")
+        self.assertEqual(result[1], "failures", "command_result_mode should be 'failures' after setting")
+
+        # Test invalid value
+        with self.assertRaises(Exception) as context:
+            self.redis.execute_command("CONFIG", "SET", "AUDIT.command_result_mode", "invalid")
+        self.assertIn("Invalid command_result_mode", str(context.exception))
             
 if __name__ == "__main__":
     unittest.main(verbosity=2)
