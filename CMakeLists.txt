@@ -1,17 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(ValkeyAudit VERSION 0.0.1 DESCRIPTION "Valkey Audit module")
 
-# After the project() line
-option(VALKEY_INCLUDE_DIR "Path to valkeymodule.h" "")
-
-# Replace the existing target_include_directories block
-target_include_directories(valkeyaudit PRIVATE
-    src
-    ${VALKEY_INCLUDE_DIR}
-)
-
-message(STATUS "Valkey include dir: ${VALKEY_INCLUDE_DIR}")
-
 find_package(Git)
 find_package(Threads REQUIRED)
 message(STATUS "GIT_EXECUTABLE='${GIT_EXECUTABLE}'")
@@ -50,8 +39,15 @@ file(GLOB SOURCES src/*.c)
 # Define the library target
 add_library(valkeyaudit SHARED ${SOURCES})
 
+# Optional path to valkeymodule.h, e.g. when building against Valkey source
+# instead of system-installed valkey-devel headers
+# Usage: cmake -DVALKEY_INCLUDE_DIR=/opt/valkey-src/src
+option(VALKEY_INCLUDE_DIR "Path to valkeymodule.h" "")
+message(STATUS "Valkey include dir: ${VALKEY_INCLUDE_DIR}")
+
 target_include_directories(valkeyaudit PRIVATE
     src
+    ${VALKEY_INCLUDE_DIR}
 )
 
 target_link_libraries(valkeyaudit PRIVATE Threads::Threads)
@@ -62,7 +58,7 @@ target_compile_definitions(valkeyaudit PRIVATE
     _THREAD_SAFE
 )
 
-# 🔥 ADD: Thread-safe compilation options
+# Thread-safe compilation options
 target_compile_options(valkeyaudit PRIVATE
     -fPIC
     -pthread
