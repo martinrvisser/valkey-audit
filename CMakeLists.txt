@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.10)
 project(ValkeyAudit VERSION 0.0.1 DESCRIPTION "Valkey Audit module")
 
+# After the project() line
+option(VALKEY_INCLUDE_DIR "Path to valkeymodule.h" "")
+
+# Replace the existing target_include_directories block
+target_include_directories(valkeyaudit PRIVATE
+    src
+    ${VALKEY_INCLUDE_DIR}
+)
+
+message(STATUS "Valkey include dir: ${VALKEY_INCLUDE_DIR}")
+
 find_package(Git)
 find_package(Threads REQUIRED)
 message(STATUS "GIT_EXECUTABLE='${GIT_EXECUTABLE}'")
