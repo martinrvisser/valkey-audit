@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ValkeyAudit VERSION 0.0.1 DESCRIPTION "Valkey Audit module")
+project(ValkeyAudit VERSION 1.0.0 DESCRIPTION "Valkey Audit module")
 
 find_package(Git)
 find_package(Threads REQUIRED)
