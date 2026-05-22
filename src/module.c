@@ -3933,7 +3933,7 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
                     i++;  // Skip the host:port argument
                     
                     // Parse host:port format
-                    char *colon = strchr(hostport, ':');
+                    const char *colon = strchr(hostport, ':');
                     if (colon) {
                         // Split host and port
                         size_t host_len = colon - hostport;
