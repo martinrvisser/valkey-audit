@@ -18,17 +18,26 @@ jobs:
 
       - name: Install dependencies
         run: |
-          yum install -y valkey valkey-devel cmake make clang clang-tools-extra git python3 python3-pip
+          yum install -y cmake make clang clang-tools-extra git python3 python3-pip \
+            gcc gcc-c++ jemalloc-devel openssl-devel
+
+      - name: Build and install Valkey 9.1.0
+        run: |
+          git clone --depth 1 --branch 9.1.0 https://github.com/valkey-io/valkey.git /opt/valkey-src
+          cd /opt/valkey-src
+          mkdir build-release
+          cmake build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          make -C build-release -j$(nproc) install
 
       - name: Build Module
         run: |
           mkdir -p build
-          cmake -S . -B build
+          cmake -S . -B build -DVALKEY_INCLUDE_DIR=/opt/valkey-src/src
           cmake --build build --target all
 
       - name: Install Python test dependencies
         run: |
-          pip3 install valkey pytest
+          pip3 install -r test/integration/requirements.txt
 
       - name: Run unit tests
         env:
