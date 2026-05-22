@@ -14,7 +14,10 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(CMAKE_C_STANDARD 17)
+# C11 (instead of C17) for compatibility with CMake < 3.21 on older
+# distros like Debian bullseye (CMake 3.18). C17 == C11 + defect fixes,
+# no new features, so this is a no-op for the source.
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
@@ -61,7 +64,7 @@ set_target_properties(valkeyaudit PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
     COMPILE_WARNING_AS_ERROR ON
-    C_STANDARD 17
+    C_STANDARD 11
     POSITION_INDEPENDENT_CODE ON
 )
 
@@ -77,5 +80,8 @@ install(TARGETS valkeyaudit
     PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-enable_testing()
-add_subdirectory(test)
+option(BUILD_TESTING "Build tests" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(test)
+endif()

@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+include /usr/share/dpkg/architecture.mk
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	cmake -S . -B obj-$(DEB_HOST_MULTIARCH) \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG -mtune=generic -flto" \
+		-DFETCHCONTENT_FULLY_DISCONNECTED=OFF \
+		-DBUILD_TESTING=OFF
+
+override_dh_auto_install:
+	install -D -m 0755 obj-*/libvalkeyaudit.so \
+		debian/percona-valkey-audit/usr/lib/valkey/modules/libvalkeyaudit.so
+	install -D -m 0644 packaging/valkey-audit.conf \
+		debian/percona-valkey-audit/etc/valkey/valkey.conf.d/valkey-audit.conf
+
+override_dh_auto_test:
+	# Tests require a running valkey-server; skip during package build
+	:
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0755 debian/percona-valkey-audit/usr/lib/valkey/modules/libvalkeyaudit.so
+
+override_dh_shlibdeps:
+	dh_shlibdeps --dpkg-shlibdeps-params=--ignore-missing-info
+
+override_dh_builddeb:
+	dh_builddeb -- -Zxz
