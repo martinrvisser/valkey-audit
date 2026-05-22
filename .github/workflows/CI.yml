@@ -1,24 +1,37 @@
 name: CI
 
 on:
-    push:
-        branches:
-            - main
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-    build:
-        runs-on: ubuntu-latest
-        container: fedora:latest
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-        steps:
-            - name: Checkout repo
-              uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - name: Install dependencies
+        run: |
+          yum install -y valkey valkey-devel cmake make clang clang-tools-extra git python3 python3-pip
 
-            - name: Install dependencies
-              run: |
-                sudo yum install -y valkey-devel cmake make clang clang-tools-extra git
-            - name: Build Module
-              run: |
-                mkdir -p build
-                cmake -S . -B build
-                cmake --build build --target all
+      - name: Build Module
+        run: |
+          mkdir -p build
+          cmake -S . -B build
+          cmake --build build --target all
+
+      - name: Install Python test dependencies
+        run: |
+          pip3 install valkey pytest
+
+      - name: Run unit tests
+        env:
+          AUDIT_MODULE_PATH: ${{ github.workspace }}/build/libvalkeyaudit.so
+        run: |
+          pytest test/unit/ -v
