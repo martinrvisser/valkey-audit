@@ -29,7 +29,7 @@ jobs:
           cd build-release
           cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
           make -j$(nproc) install
-          
+
       - name: Build Module
         run: |
           mkdir -p build
@@ -39,6 +39,10 @@ jobs:
       - name: Install Python test dependencies
         run: |
           pip3 install -r test/integration/requirements.txt
+      
+      - name: Install Python unit test dependencies
+        run: |
+          pip3 install -r test/unit/requirements.txt
 
       - name: Run unit tests
         env:
