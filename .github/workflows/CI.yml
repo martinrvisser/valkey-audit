@@ -26,9 +26,10 @@ jobs:
           git clone --depth 1 --branch 9.1.0 https://github.com/valkey-io/valkey.git /opt/valkey-src
           cd /opt/valkey-src
           mkdir build-release
-          cmake build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
-          make -C build-release -j$(nproc) install
-
+          cd build-release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          make -j$(nproc) install
+          
       - name: Build Module
         run: |
           mkdir -p build
