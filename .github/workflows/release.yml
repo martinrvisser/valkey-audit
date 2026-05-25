@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches:
+      - '[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    # Only run the full release job on tag pushes, not branch pushes
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Install dependencies
+        run: |
+          yum install -y cmake make clang clang-tools-extra git python3 python3-pip \
+            gcc gcc-c++ jemalloc-devel openssl-devel
+
+      - name: Build and install Valkey 9.1.0
+        run: |
+          git clone --depth 1 --branch 9.1.0 https://github.com/valkey-io/valkey.git /opt/valkey-src
+          cd /opt/valkey-src
+          mkdir build-release
+          cd build-release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          make -j$(nproc) install
+
+      - name: Build Module
+        run: |
+          mkdir -p build
+          cmake -S . -B build -DVALKEY_INCLUDE_DIR=/opt/valkey-src/src
+          cmake --build build --target all
+
+      - name: Install Python test dependencies
+        run: |
+          pip3 install -r test/unit/requirements.txt
+
+      - name: Run unit tests
+        env:
+          AUDIT_MODULE_PATH: ${{ github.workspace }}/build/libvalkeyaudit.so
+        run: |
+          pytest test/unit/ -v
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          TAG=${{ github.ref_name }}
+          if [[ "$TAG" == *"-rc"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "draft=false" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "draft=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ValkeyAudit ${{ github.ref_name }}
+          draft: ${{ steps.release_type.outputs.draft }}
+          prerelease: ${{ steps.release_type.outputs.prerelease }}
+          files: build/libvalkeyaudit.so
+          body: |
+            See [CHANGELOG.md](https://github.com/martinrvisser/valkey-audit/blob/main/CHANGELOG.md) for details.
