@@ -1,0 +1,12 @@
+percona-valkey-audit (1.0.0-1) unstable; urgency=medium
+
+  * Bump to 1.0.0
+  * Updated for Valkey 9.1 compatibility
+
+ -- Martin Visser <martinrvisser@gmail.com>  Mon, 25 May 2026 00:00:00 +0000
+
+percona-valkey-audit (0.2.2-1) unstable; urgency=medium
+
+  * Initial DEB packaging
+
+ -- Evgeniy Patlan <evgeniy.patlan@percona.com>  Tue, 03 Mar 2026 00:00:00 +0000

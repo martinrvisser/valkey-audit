@@ -1,0 +1,20 @@
+Source: percona-valkey-audit
+Section: database
+Priority: optional
+Maintainer: Martin Visser <martinrvisser@gmail.com>
+Build-Depends: debhelper (>= 10), cmake (>= 3.10), gcc, g++, make, git,
+ percona-valkey-dev
+Standards-Version: 4.1.4
+Homepage: https://github.com/martinrvisser/valkey-audit
+
+Package: percona-valkey-audit
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, percona-valkey-server
+Provides: valkey-audit
+Replaces: valkey-audit
+Conflicts: valkey-audit
+Description: Audit logging module for Valkey
+ A Valkey server module that provides comprehensive audit logging. Logs
+ connections, authentication, configuration changes, key operations, and more
+ to file, syslog, or TCP in text, JSON, or CSV formats. Supports exclusion
+ rules by username, IP, command, and custom categories.
