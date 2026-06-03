@@ -45,20 +45,65 @@ class TestCommandResultBase(unittest.TestCase):
                     raise
                 time.sleep(0.5)
 
-        # Probe whether the server supports command result events.
-        # Trigger a known WRONGTYPE failure and check if the audit log captures it.
+        # Probe whether the server fires command result events.
+        # Trigger a known WRONGTYPE failure and poll until the async writer
+        # flushes the entry, or time out.  Timeout is tunable via
+        # AUDIT_PROBE_TIMEOUT (seconds, default 5).
+        probe_timeout = float(os.environ.get("AUDIT_PROBE_TIMEOUT", "5"))
         open(cls.log_file, 'w').close()
         cls.client.set("__probe__", "string")
         try:
             cls.client.lpush("__probe__", "val")
         except Exception:
             pass
-        time.sleep(0.5)
-        try:
-            with open(cls.log_file) as f:
-                cls.command_result_supported = len(f.read()) > 0
-        except FileNotFoundError:
-            cls.command_result_supported = False
+        deadline = time.monotonic() + probe_timeout
+        cls.command_result_supported = False
+        while time.monotonic() < deadline:
+            try:
+                if os.path.getsize(cls.log_file) > 0:
+                    cls.command_result_supported = True
+                    break
+            except FileNotFoundError:
+                pass
+            time.sleep(0.1)
+        if not cls.command_result_supported:
+            # Emit diagnostics so CI tells us exactly what happened.
+            try:
+                with open(cls.conf_file) as f:
+                    conf_contents = f.read()
+            except Exception:
+                conf_contents = "<unreadable>"
+            try:
+                cls.stdout_file.flush()
+                with open(os.path.join(cls.temp_dir, "server.out")) as fh:
+                    stdout_data = fh.read()
+            except Exception:
+                stdout_data = "<unavailable>"
+            try:
+                cls.stderr_file.flush()
+                with open(os.path.join(cls.temp_dir, "server.err")) as fh:
+                    stderr_data = fh.read()
+            except Exception:
+                stderr_data = "<unavailable>"
+            try:
+                module_list = cls.client.execute_command("MODULE", "LIST")
+            except Exception as exc:
+                module_list = str(exc)
+            try:
+                log_size = os.path.getsize(cls.log_file)
+            except Exception:
+                log_size = -1
+            print(
+                f"\n[PROBE FAILED] command-result event not logged within "
+                f"{probe_timeout}s\n"
+                f"  module path : {cls.module_path}\n"
+                f"  log file    : {cls.log_file} ({log_size} bytes)\n"
+                f"  MODULE LIST : {module_list}\n"
+                f"  -- server conf --\n{conf_contents}\n"
+                f"  -- server stdout (last 4 KB) --\n{stdout_data}\n"
+                f"  -- server stderr (last 4 KB) --\n{stderr_data}",
+                flush=True
+            )
         open(cls.log_file, 'w').close()
         cls.client.delete("__probe__")
 
@@ -82,10 +127,12 @@ class TestCommandResultBase(unittest.TestCase):
             if extra_config:
                 f.write(extra_config + "\n")
 
+        cls.stdout_file = open(os.path.join(cls.temp_dir, "server.out"), 'w')
+        cls.stderr_file = open(os.path.join(cls.temp_dir, "server.err"), 'w')
         cls.server_proc = subprocess.Popen(
             [cls.valkey_server, cls.conf_file],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=cls.stdout_file,
+            stderr=cls.stderr_file
         )
         time.sleep(1)
 
@@ -94,10 +141,10 @@ class TestCommandResultBase(unittest.TestCase):
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
             cls.server_proc.wait(timeout=5)
-            if cls.server_proc.stdout:
-                cls.server_proc.stdout.close()
-            if cls.server_proc.stderr:
-                cls.server_proc.stderr.close()
+        if hasattr(cls, 'stdout_file'):
+            cls.stdout_file.close()
+        if hasattr(cls, 'stderr_file'):
+            cls.stderr_file.close()
 
     def _read_log_file(self):
         try:
@@ -116,8 +163,10 @@ class TestCommandResultBase(unittest.TestCase):
     def skipIfNoCommandResultSupport(self):
         if not getattr(self.__class__, 'command_result_supported', True):
             self.skipTest(
-                "Server does not support command result events "
-                "(requires Valkey build with PR #2936)"
+                "Probe found no command-result event in the audit log "
+                "(async writer did not flush within the probe window — "
+                "see [PROBE FAILED] diagnostics above; increase "
+                "AUDIT_PROBE_TIMEOUT if the runner is slow)"
             )
 
 

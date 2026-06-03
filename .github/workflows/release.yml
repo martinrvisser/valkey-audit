@@ -48,7 +48,7 @@ jobs:
         env:
           AUDIT_MODULE_PATH: ${{ github.workspace }}/build/libvalkeyaudit.so
         run: |
-          pytest test/unit/ -v
+          pytest test/unit/ -v -rs
 
       - name: Determine release type
         id: release_type
