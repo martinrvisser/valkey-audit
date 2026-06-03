@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
 
 jobs:
   build-and-test:
@@ -38,14 +34,10 @@ jobs:
 
       - name: Install Python test dependencies
         run: |
-          pip3 install -r test/integration/requirements.txt
-      
-      - name: Install Python unit test dependencies
-        run: |
           pip3 install -r test/unit/requirements.txt
 
       - name: Run unit tests
         env:
           AUDIT_MODULE_PATH: ${{ github.workspace }}/build/libvalkeyaudit.so
         run: |
-          pytest test/unit/ -v
+          pytest test/unit/ -v -rs
