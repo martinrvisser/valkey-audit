@@ -111,7 +111,11 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         """Stop the Valkey server"""
         if hasattr(cls, 'server_proc'):
             cls.server_proc.terminate()
-            cls.server_proc.wait(timeout=5)
+            try:
+                cls.server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                cls.server_proc.kill()
+                cls.server_proc.wait()
             if cls.server_proc.stdout:
                 cls.server_proc.stdout.close()
             if cls.server_proc.stderr:
@@ -128,7 +132,14 @@ class ValkeyAuditModuleTests(unittest.TestCase):
     def _clear_log_file(self):
         """Clear the contents of the audit log file"""
         open(self.log_file, 'w').close()
-    
+
+    @staticmethod
+    def _get_config_value(result):
+        """Extract the value from CONFIG GET, handling both dict (new client) and list."""
+        if isinstance(result, dict):
+            return next(iter(result.values()))
+        return result[1]
+
     def test_001_module_loaded(self):
         """Test that the audit module is loaded correctly"""
         module_list = self.redis.module_list()
@@ -207,10 +218,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the protocol was set correctly
             protocol_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.PROTOCOL")
-            self.assertIsInstance(protocol_result, list, "CONFIG GET should return a list")
-            self.assertEqual(len(protocol_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual(protocol_result[0], "AUDIT.PROTOCOL", "Unexpected config key")
-            self.assertEqual(protocol_result[1], tcp_config, "TCP protocol not set correctly")
+            self.assertGreater(len(protocol_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(self._get_config_value(protocol_result), tcp_config, "TCP protocol not set correctly")
             
             # Write something to trigger an audit event
             self.redis.set("tcp_test_key", "tcp_test_value")
@@ -269,8 +278,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the value was set
             config_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.tcp_timeout_ms")
-            self.assertEqual(len(config_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual(int(config_result[1]), timeout, f"tcp_timeout_ms not set to {timeout}")
+            self.assertGreater(len(config_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(int(self._get_config_value(config_result)), timeout, f"tcp_timeout_ms not set to {timeout}")
         
         # Test invalid timeout values
         invalid_timeouts = [-1, -100, 0]
@@ -293,8 +302,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the value was set
             config_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.tcp_retry_interval_ms")
-            self.assertEqual(len(config_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual(int(config_result[1]), interval, f"tcp_retry_interval_ms not set to {interval}")
+            self.assertGreater(len(config_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(int(self._get_config_value(config_result)), interval, f"tcp_retry_interval_ms not set to {interval}")
         
         # Test invalid retry interval values
         invalid_intervals = [-1, -500, 0]
@@ -316,8 +325,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the value was set
             config_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.tcp_max_retries")
-            self.assertEqual(len(config_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual(int(config_result[1]), retries, f"tcp_max_retries not set to {retries}")
+            self.assertGreater(len(config_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(int(self._get_config_value(config_result)), retries, f"tcp_max_retries not set to {retries}")
         
         # Test invalid max retries values
         invalid_retries = [-1, -10]
@@ -342,8 +351,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the value was set
             config_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.tcp_reconnect_on_failure")
-            self.assertEqual(len(config_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual((config_result[1]), expected_val, 
+            self.assertGreater(len(config_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(self._get_config_value(config_result), expected_val,
                             f"tcp_reconnect_on_failure not set correctly for input {input_val}")
         
         # Test invalid boolean values
@@ -369,8 +378,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
             
             # Verify the value was set
             config_result = self.redis.execute_command("CONFIG", "GET", "AUDIT.tcp_buffer_on_disconnect")
-            self.assertEqual(len(config_result), 2, "CONFIG GET should return key-value pair")
-            self.assertEqual((config_result[1]), expected_val, 
+            self.assertGreater(len(config_result), 0, "CONFIG GET should return a result")
+            self.assertEqual(self._get_config_value(config_result), expected_val,
                             f"tcp_buffer_on_disconnect not set correctly for input {input_val}")
         
         # Test invalid boolean values
@@ -410,8 +419,8 @@ class ValkeyAuditModuleTests(unittest.TestCase):
         
         for config_key, expected_value in configs_to_check:
             result = self.redis.execute_command("CONFIG", "GET", config_key)
-            self.assertEqual(len(result), 2, f"CONFIG GET {config_key} should return key-value pair")
-            self.assertEqual(result[1], expected_value, f"{config_key} not set to {expected_value}")
+            self.assertGreater(len(result), 0, f"CONFIG GET {config_key} should return a result")
+            self.assertEqual(self._get_config_value(result), expected_value, f"{config_key} not set to {expected_value}")
         
         # Test with disconnecting server to verify retry behavior
         received_data = Queue()

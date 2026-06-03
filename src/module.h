@@ -47,6 +47,7 @@
 // module config structure
 typedef struct AuditConfig {
     int enabled;
+    int protocol_ready;
     int protocol;
     int format;
     int event_mask;

@@ -160,6 +160,13 @@ class TestCommandResultBase(unittest.TestCase):
         lines = self._read_log_file()
         return lines[-n:] if len(lines) >= n else lines
 
+    @staticmethod
+    def _get_config_value(result):
+        """Extract the value from CONFIG GET, handling both dict (new client) and list."""
+        if isinstance(result, dict):
+            return next(iter(result.values()))
+        return result[1]
+
     def skipIfNoCommandResultSupport(self):
         if not getattr(self.__class__, 'command_result_supported', True):
             self.skipTest(
@@ -176,8 +183,7 @@ class TestCommandResultConfig(TestCommandResultBase):
     def test_001_default_mode_is_failures(self):
         """Default command_result_mode should be 'failures'."""
         result = self.client.execute_command("CONFIG", "GET", "audit.command_result_mode")
-        # CONFIG GET returns a list: [key, value]
-        self.assertEqual(result[1], "failures",
+        self.assertEqual(self._get_config_value(result), "failures",
                          "Default command_result_mode should be 'failures'")
 
     def test_002_set_mode_all(self):
@@ -188,7 +194,7 @@ class TestCommandResultConfig(TestCommandResultBase):
 
         result = self.client.execute_command("CONFIG", "GET",
                                              "audit.command_result_mode")
-        self.assertEqual(result[1], "all")
+        self.assertEqual(self._get_config_value(result), "all")
 
     def test_003_set_mode_failures(self):
         """Setting command_result_mode to 'failures' should succeed."""
@@ -198,7 +204,7 @@ class TestCommandResultConfig(TestCommandResultBase):
 
         result = self.client.execute_command("CONFIG", "GET",
                                              "audit.command_result_mode")
-        self.assertEqual(result[1], "failures")
+        self.assertEqual(self._get_config_value(result), "failures")
 
     def test_004_set_mode_invalid(self):
         """Setting command_result_mode to an invalid value should fail."""
@@ -586,7 +592,7 @@ class TestCommandResultSuccessLogging(TestCommandResultBase):
         # Verify the mode was set
         result = self.client.execute_command("CONFIG", "GET",
                                              "audit.command_result_mode")
-        self.assertEqual(result[1], "all")
+        self.assertEqual(self._get_config_value(result), "all")
 
         # Reset back
         self.client.execute_command("CONFIG", "SET",

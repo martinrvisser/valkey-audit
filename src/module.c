@@ -30,6 +30,7 @@ static int loglevel_debug = 0;
 
 static AuditConfig config = {
     .enabled = 1,
+    .protocol_ready = 0,
     .protocol = AUDIT_PROTOCOL_FILE,
     .format = FORMAT_TEXT,
     .event_mask = EVENT_CONNECTIONS | EVENT_AUTH | EVENT_CONFIG | EVENT_KEYS | EVENT_OTHER,
@@ -910,7 +911,7 @@ static size_t circularBufferRead(char *dest, size_t max_len) {
 }
 
 void writeAuditLog(const char *format, ...) {
-    if (!config.enabled || !format) {
+    if (!config.enabled || !config.protocol_ready || !format) {
         return;
     }
     
@@ -2169,13 +2170,15 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
                     config.file_path, strerror(errno));
             *err = ValkeyModule_CreateString(NULL, error_msg, strlen(error_msg));
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_ERROR);
+            config.protocol_ready = 0;
             return VALKEYMODULE_ERR;
         } else {
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_CONNECTED);
+            config.protocol_ready = 1;
         }
 
         return VALKEYMODULE_OK;
-    } 
+    }
     else if (len >= 7 && strncasecmp(input, "syslog ", 7) == 0) {
         ValkeyModule_Log(NULL, "notice", "Audit: Matched syslog protocol");
         const char *facility_str = input + 7;
@@ -2230,7 +2233,8 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         // Initialize syslog
         openlog("valkey-audit", LOG_PID, config.syslog_facility);
         audit_metrics_set_status(AUDIT_PROTOCOL_SYSLOG, AUDIT_STATUS_CONNECTED);
-        
+        config.protocol_ready = 1;
+
         return VALKEYMODULE_OK;
     }
     else if (len >= 4 && strncasecmp(input, "tcp ", 4) == 0) {
@@ -2304,10 +2308,11 @@ int setAuditProtocol(const char *name, ValkeyModuleString *new_val, void *privda
         config.tcp_host = host;
         config.tcp_port = port;
         config.tcp_socket = -1; // Will be connected on first use
-        
+        config.protocol_ready = 1;
+
         ValkeyModule_Log(NULL, "notice", "Audit: TCP protocol configured successfully");
         return VALKEYMODULE_OK;
-    }  
+    }
     else {
         ValkeyModule_Log(NULL, "notice", "Audit: No protocol matched, input was: '%.*s'", (int)len, input);
         *err = ValkeyModule_CreateString(NULL, "ERR Unknown protocol. Use 'file <path>', 'syslog <facility>', or 'tcp <host:port>'", 84);
@@ -3348,7 +3353,7 @@ void clientChangeCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent e, uint64_t su
     VALKEYMODULE_NOT_USED(e);
 
     // Determine if we should log connection events, but always track clients for command auditing
-    int log_connection = (config.enabled == 1) && (config.event_mask & EVENT_CONNECTIONS);
+    int log_connection = (config.enabled == 1) && (config.protocol_ready == 1) && (config.event_mask & EVENT_CONNECTIONS);
 
     ValkeyModuleClientInfo *ci = data;
     const char *event_type = (sub == VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED) ?
@@ -3451,7 +3456,7 @@ int authLoggerCallback(ValkeyModuleCtx *ctx, ValkeyModuleString *username,
     VALKEYMODULE_NOT_USED(password);
     VALKEYMODULE_NOT_USED(err);
 
-    if (config.enabled != 1) return VALKEYMODULE_AUTH_NOT_HANDLED;
+    if (config.enabled != 1 || !config.protocol_ready) return VALKEYMODULE_AUTH_NOT_HANDLED;
 
     // Extract username
     size_t username_len;
@@ -3487,7 +3492,7 @@ void authenticationAttemptCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent eid,
     VALKEYMODULE_NOT_USED(eid);
     VALKEYMODULE_NOT_USED(subevent);
 
-    if (config.enabled != 1) return;
+    if (config.enabled != 1 || !config.protocol_ready) return;
 
     ValkeyModuleAuthenticationInfo *info = (ValkeyModuleAuthenticationInfo *)data;
     if (info->version != VALKEYMODULE_AUTHENTICATION_INFO_VERSION) return;
@@ -3522,7 +3527,7 @@ void commandResultCallback(ValkeyModuleCtx *ctx, ValkeyModuleEvent eid,
                             uint64_t subevent, void *data) {
     VALKEYMODULE_NOT_USED(ctx);
 
-    if (config.enabled != 1) return;
+    if (config.enabled != 1 || !config.protocol_ready) return;
 
     // Determine event type
     int is_acl_rejected = (eid.id == VALKEYMODULE_EVENT_COMMAND_RESULT_ACL_REJECTED);
@@ -4203,10 +4208,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
                            "Check that the directory exists and has correct permissions");
             ValkeyModule_Log(ctx, "warning",
                            "Audit logging will be disabled until a valid protocol is configured");
-            // Set protocol to an invalid state or disable auditing
-            config.enabled = 0;
+            config.protocol_ready = 0;
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_ERROR);
         } else {
+            config.protocol_ready = 1;
             audit_metrics_set_status(AUDIT_PROTOCOL_FILE, AUDIT_STATUS_CONNECTED);
             ValkeyModule_Log(ctx, "notice", "Audit log file opened successfully: %s", config.file_path);
         }
