@@ -536,7 +536,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             try:
                 json_entry = json.loads(line)
                 if "command" in json_entry and json_entry["command"] == "SET":
-                    self.assertIn("key=", json_entry["details"])
+                    self.assertIn("key=", json_entry["command_args"])
                     valid_json_found = True
             except json.JSONDecodeError:
                 print(f"Invalid JSON in line: {line}")
@@ -726,9 +726,9 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 json_entry = json.loads(line)
                 if json_entry.get("command") == "SET":
                     set_cmd_found = True
-                    self.assertIn("key1", json_entry["details"])
+                    self.assertIn("key1", json_entry["command_args"])
                     # Check that value is truncated (if it's included)
-                    details = json_entry["details"]
+                    details = json_entry["command_args"]
                     if "payload" in details:
                         self.assertIn(max_value, details)
                         parts = details.split("payload=")
