@@ -48,6 +48,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         s = socket.socket(); s.bind(('', 0)); port = s.getsockname()[1]; s.close()
         with open(conf_file, 'w') as f:
             f.write(f"port {port}\nsave \"\"\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"loadmodule {cls.module_path}\n")
             f.write(f"audit.protocol file {log_file}\n")
             f.write(f"audit.events keys\n")  # keys only: exclude connections from probe
@@ -56,7 +57,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             time.sleep(2)
-            r = redis.Redis(host='localhost', port=port, decode_responses=True)
+            r = redis.Redis(host='127.0.0.1', port=port, decode_responses=True)
             open(log_file, 'w').close()
             r.set("__probe__", "string")
             try: r.lpush("__probe__", "val")
@@ -186,6 +187,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         with open(self.valkey_conf_path, 'w') as f:
             f.write(f"logfile /tmp/vka.log \n")
             f.write(f"port {self.port}\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"{module_load_line}\n")
             f.write(f"audit.command_result_mode {command_result_mode}\n")
         
@@ -209,7 +211,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         timeout = 10  # seconds
         
         # Create client connection
-        self.client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
+        self.client = redis.Redis(host='127.0.0.1', port=self.port, decode_responses=True)
         
         # Check if server is responsive
         while time.time() - start_time < timeout:
@@ -261,7 +263,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             print("No server process was running")
 
         # Verify server is actually stopped by attempting to connect
-        test_client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
+        test_client = redis.Redis(host='127.0.0.1', port=self.port, decode_responses=True)
         try:
             test_client.ping()
             print("WARNING: Server appears to still be running!")
@@ -742,13 +744,13 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         self.client.set("key1", "value1")
         
         # Create a new connection
-        new_client = redis.Redis(host='localhost', port=self.port)
+        new_client = redis.Redis(host='127.0.0.1', port=self.port)
         new_client.ping()
         new_client.close()
-        
+
         # Give time for logs to be written
         time.sleep(0.5)
-        
+
         log_content = self.read_audit_log()
         self.assertIn("connect", log_content.lower())
         self.assertNotIn("[KEY_OP] SET".lower(), log_content.lower())
@@ -793,7 +795,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             pass
         
         # Create a new connection (connections event)
-        new_client = redis.Redis(host='localhost', port=self.port)
+        new_client = redis.Redis(host='127.0.0.1', port=self.port)
         new_client.ping()
         new_client.close()
         
@@ -1076,6 +1078,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         # Create replica config with ignore_internal_clients enabled
         with open(replica_conf_path, 'w') as f:
             f.write(f"port {replica_port}\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"replicaof 127.0.0.1 {self.port}\n")
             f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients yes\n")
             f.write(f"audit.command_result_mode all\n")
@@ -1092,7 +1095,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             time.sleep(2)
 
             # Create client connection to replica
-            replica_client = redis.Redis(host='localhost', port=replica_port, decode_responses=True)
+            replica_client = redis.Redis(host='127.0.0.1', port=replica_port, decode_responses=True)
             replica_client.ping()
 
             # Do some operations on the primary to trigger replication
