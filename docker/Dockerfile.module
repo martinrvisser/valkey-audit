@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.7
+#
+# Builds a minimal OCI artifact image containing ONLY the compiled
+# valkey-audit module (libvalkeyaudit.so). Intended to be mounted into a
+# standard Valkey container via the Kubernetes ImageVolume feature, or copied
+# out with an init container.
+#
+# The final image is FROM scratch: no shell, no runtime, just the .so + LICENSE.
+#
+# Build locally for one arch:
+#   docker build -f docker/Dockerfile.module -t valkey-audit:dev .
+# Multi-arch is handled by the publish workflow using native runners.
+
+# ---- Pinned inputs ---------------------------------------------------------
+# Valkey version whose valkeymodule.h we compile against. The module links
+# ONLY against libc/pthread (verified with ldd) and resolves Valkey symbols at
+# load time, so this pins the module *API* we build to, not a runtime dep.
+ARG VALKEY_VERSION=9.1.0
+
+# glibc build base. bookworm matches the official `valkey/valkey:*-bookworm`
+# (Debian) images. Use an older base (e.g. bullseye) if you need a lower glibc
+# floor for forward-compat; do NOT expect a glibc build to load in an Alpine
+# (musl) Valkey image — build a separate musl variant for that.
+ARG BUILDER_BASE=debian:bookworm-slim
+
+# ---- Build stage -----------------------------------------------------------
+FROM ${BUILDER_BASE} AS build
+ARG VALKEY_VERSION
+# TARGETARCH is provided automatically by BuildKit (amd64 / arm64).
+ARG TARGETARCH
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential cmake curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# Fetch the single, self-contained module header for the pinned Valkey version.
+RUN mkdir -p /vkinc \
+ && curl -fsSL -o /vkinc/valkeymodule.h \
+      "https://raw.githubusercontent.com/valkey-io/valkey/${VALKEY_VERSION}/src/valkeymodule.h"
+
+# IMPORTANT: the repo's default Release flags use `-march=native -mtune=native`,
+# which tunes the binary to the *builder's* CPU and will SIGILL on other hosts.
+# For a distributable artifact we override the baseline per target arch via
+# AUDIT_C_FLAGS_RELEASE. (CMakeLists.txt reads that CACHE variable into
+# CMAKE_C_FLAGS_RELEASE; a -DCMAKE_C_FLAGS_RELEASE would be silently discarded
+# by the in-file set().) VALKEY_AUDIT_TESTS=OFF skips the googletest download
+# since we only build the module target here.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) MARCH="-march=x86-64-v2" ;; \
+      arm64) MARCH="-march=armv8-a"   ;; \
+      *)     MARCH=""                 ;; \
+    esac; \
+    cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DVALKEY_INCLUDE_DIR=/vkinc \
+      -DVALKEY_AUDIT_TESTS=OFF \
+      -DAUDIT_C_FLAGS_RELEASE="-O2 -DNDEBUG ${MARCH} -flto"; \
+    cmake --build build --target valkeyaudit -j"$(nproc)"; \
+    # The target sets VERSION/SOVERSION, so the real file is libvalkeyaudit.so.X.Y.Z
+    # behind a symlink chain. Dereference into a stable, flat name and strip it.
+    mkdir -p /out; \
+    cp -L build/libvalkeyaudit.so /out/libvalkeyaudit.so; \
+    strip --strip-unneeded /out/libvalkeyaudit.so; \
+    cp LICENSE /out/LICENSE
+
+# ---- Final artifact image --------------------------------------------------
+FROM scratch
+ARG VALKEY_VERSION
+LABEL org.opencontainers.image.title="valkey-audit module" \
+      org.opencontainers.image.description="Compiled valkey-audit shared library (libvalkeyaudit.so) for use as a Kubernetes ImageVolume" \
+      org.opencontainers.image.licenses="BSD-3-Clause" \
+      org.opencontainers.image.source="https://github.com/martinrvisser/valkey-audit" \
+      io.valkey-audit.built-against-valkey="${VALKEY_VERSION}"
+
+# Stable, documented path. With ImageVolume mounted at e.g. /modules, the module
+# is then at /modules/libvalkeyaudit.so. Keep this path constant across versions.
+COPY --from=build /out/libvalkeyaudit.so /libvalkeyaudit.so
+COPY --from=build /out/LICENSE /LICENSE
