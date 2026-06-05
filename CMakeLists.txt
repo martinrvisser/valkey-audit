@@ -24,8 +24,17 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/test/valkey.conf ${CMAKE_CURRENT_BINA
 # CHANGED: Conditional flags based on build type
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -Wunused -Wunused-parameter -pthread")
 
-# Performance-focused flags for Release builds
-set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -mtune=native -flto")
+# Performance-focused flags for Release builds.
+# WARNING: -march=native tunes the binary to the BUILDING host's CPU and is NOT
+# portable -- a binary built this way may SIGILL on older CPUs. Distributable
+# builds (see docker/Dockerfile.module) MUST override the baseline, e.g.
+#   cmake -DAUDIT_C_FLAGS_RELEASE="-O2 -DNDEBUG -march=x86-64-v2 -flto"
+# Indirection through a CACHE variable is deliberate: a plain
+# set(CMAKE_C_FLAGS_RELEASE ...) would shadow and silently discard any
+# -DCMAKE_C_FLAGS_RELEASE passed on the command line.
+set(AUDIT_C_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -mtune=native -flto"
+    CACHE STRING "C compiler flags for Release builds")
+set(CMAKE_C_FLAGS_RELEASE "${AUDIT_C_FLAGS_RELEASE}")
 
 # Alternative optimization levels for testing
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
@@ -84,5 +93,10 @@ install(TARGETS valkeyaudit
     PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
+# Tests are built by default but can be skipped (e.g. distributable artifact
+# builds) to avoid the configure-time googletest FetchContent download.
+option(VALKEY_AUDIT_TESTS "Build the test suite" ON)
 enable_testing()
-add_subdirectory(test)
+if(VALKEY_AUDIT_TESTS)
+    add_subdirectory(test)
+endif()
