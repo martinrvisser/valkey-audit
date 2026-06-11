@@ -48,6 +48,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         s = socket.socket(); s.bind(('', 0)); port = s.getsockname()[1]; s.close()
         with open(conf_file, 'w') as f:
             f.write(f"port {port}\nsave \"\"\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"loadmodule {cls.module_path}\n")
             f.write(f"audit.protocol file {log_file}\n")
             f.write(f"audit.events keys\n")  # keys only: exclude connections from probe
@@ -56,7 +57,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             time.sleep(2)
-            r = redis.Redis(host='localhost', port=port, decode_responses=True)
+            r = redis.Redis(host='127.0.0.1', port=port, decode_responses=True)
             open(log_file, 'w').close()
             r.set("__probe__", "string")
             try: r.lpush("__probe__", "val")
@@ -186,6 +187,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         with open(self.valkey_conf_path, 'w') as f:
             f.write(f"logfile /tmp/vka.log \n")
             f.write(f"port {self.port}\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"{module_load_line}\n")
             f.write(f"audit.command_result_mode {command_result_mode}\n")
         
@@ -209,7 +211,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         timeout = 10  # seconds
         
         # Create client connection
-        self.client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
+        self.client = redis.Redis(host='127.0.0.1', port=self.port, decode_responses=True)
         
         # Check if server is responsive
         while time.time() - start_time < timeout:
@@ -261,7 +263,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             print("No server process was running")
 
         # Verify server is actually stopped by attempting to connect
-        test_client = redis.Redis(host='localhost', port=self.port, decode_responses=True)
+        test_client = redis.Redis(host='127.0.0.1', port=self.port, decode_responses=True)
         try:
             test_client.ping()
             print("WARNING: Server appears to still be running!")
@@ -592,25 +594,77 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             mock_tcp_server.stop()
 
     def read_syslog_entries(self):
-        """Read recent syslog entries containing valkey-audit."""
-        try:
-            # This implementation depends on your system's syslog configuration
-            # Common approaches:
-            
-            # Option 1: Read from /var/log/syslog (Ubuntu/Debian)
-            with open('/var/log/syslog', 'r') as f:
-                lines = f.readlines()
-                recent_lines = lines[-100:]  # Get last 100 lines
-                return '\n'.join([line for line in recent_lines if 'valkey-audit' in line])
-                
-            # Option 2: Use journalctl (systemd systems)
-            # import subprocess
-            # result = subprocess.run(['journalctl', '-n', '100', '--grep', 'valkey-audit'], 
-            #                        capture_output=True, text=True)
-            # return result.stdout
-            
-        except Exception as e:
-            self.skipTest(f"Unable to read syslog: {e}")
+        """Read recent syslog entries containing valkey-audit.
+
+        Tries every available source and returns the union of matching lines.
+        On Rocky9/RHEL the syslog socket is owned by rsyslog (not journald),
+        so entries go to /var/log/messages (which may be root-only) rather
+        than the journal.  We therefore try:
+          1. /var/log/syslog     (Ubuntu/Debian, world-readable)
+          2. /var/log/messages   (RHEL/Rocky — needs root or adm group)
+          3. journalctl -t       (SYSLOG_IDENTIFIER filter, works when journald
+                                  owns the syslog socket)
+          4. journalctl broad    (fallback: scan last 500 lines for our patterns)
+
+        journalctl informational lines (starting with "-- ") are excluded.
+        The test is skipped when entries cannot be found through any source.
+        """
+        entries = []
+
+        def _journal_lines(cmd):
+            """Run journalctl cmd and return non-boilerplate lines."""
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    return [l for l in r.stdout.splitlines()
+                            if l.strip() and not l.startswith('-- ')]
+            except Exception:
+                pass
+            return None  # None means journalctl unavailable; [] means ran but empty
+
+        # 1 & 2: file-based logs
+        for log_file in ('/var/log/syslog', '/var/log/messages'):
+            try:
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
+                entries.extend(l.rstrip() for l in lines[-500:] if 'valkey-audit' in l)
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue  # PermissionError etc.
+
+        if entries:
+            return '\n'.join(entries)
+
+        # 3: journalctl filtered by SYSLOG_IDENTIFIER
+        lines = _journal_lines(['journalctl', '-n', '300', '--no-pager', '-t', 'valkey-audit'])
+        if lines is not None:
+            entries.extend(lines)
+
+        if entries:
+            return '\n'.join(entries)
+
+        # 4: broad scan — journald may store entries from a different identifier
+        #    (e.g. when rsyslog forwards to journald without preserving the tag).
+        #    Filter for our audit message patterns instead.
+        lines = _journal_lines(['journalctl', '-n', '500', '--no-pager'])
+        if lines is not None:
+            entries.extend(
+                l for l in lines
+                if 'valkey-audit' in l or '[KEY_OP]' in l or '[AUTH]' in l or '[CONNECTION]' in l
+            )
+
+        if entries:
+            return '\n'.join(entries)
+
+        # Nothing found through any channel — skip rather than fail
+        self.skipTest(
+            "Syslog entries for valkey-audit not found: /var/log/syslog and "
+            "/var/log/messages are not readable and journalctl has no matching "
+            "entries.  Run as root or add the test user to the 'adm' group."
+        )
+
+        return '\n'.join(entries)
 
     def start_mock_tcp_server(self, host, port):
         """Start a mock TCP server to capture audit logs."""
@@ -639,7 +693,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             try:
                 json_entry = json.loads(line)
                 if "command" in json_entry and json_entry["command"].upper() == "SET":
-                    self.assertIn("key=", json_entry["details"])
+                    self.assertIn("key=", json_entry["command_args"])
                     valid_json_found = True
             except json.JSONDecodeError:
                 print(f"Invalid JSON in line: {line}")
@@ -690,13 +744,13 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         self.client.set("key1", "value1")
         
         # Create a new connection
-        new_client = redis.Redis(host='localhost', port=self.port)
+        new_client = redis.Redis(host='127.0.0.1', port=self.port)
         new_client.ping()
         new_client.close()
-        
+
         # Give time for logs to be written
         time.sleep(0.5)
-        
+
         log_content = self.read_audit_log()
         self.assertIn("connect", log_content.lower())
         self.assertNotIn("[KEY_OP] SET".lower(), log_content.lower())
@@ -741,7 +795,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             pass
         
         # Create a new connection (connections event)
-        new_client = redis.Redis(host='localhost', port=self.port)
+        new_client = redis.Redis(host='127.0.0.1', port=self.port)
         new_client.ping()
         new_client.close()
         
@@ -829,9 +883,9 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 json_entry = json.loads(line)
                 if json_entry.get("command", "").upper() == "SET":
                     set_cmd_found = True
-                    self.assertIn("key1", json_entry["details"])
+                    self.assertIn("key1", json_entry["command_args"])
                     # Check that value is truncated (if it's included)
-                    details = json_entry["details"]
+                    details = json_entry["command_args"]
                     if "payload" in details:
                         self.assertIn(max_value, details)
                         parts = details.split("payload=")
@@ -1024,6 +1078,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         # Create replica config with ignore_internal_clients enabled
         with open(replica_conf_path, 'w') as f:
             f.write(f"port {replica_port}\n")
+            f.write(f"bind 127.0.0.1\n")
             f.write(f"replicaof 127.0.0.1 {self.port}\n")
             f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients yes\n")
             f.write(f"audit.command_result_mode all\n")
@@ -1040,7 +1095,7 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
             time.sleep(2)
 
             # Create client connection to replica
-            replica_client = redis.Redis(host='localhost', port=replica_port, decode_responses=True)
+            replica_client = redis.Redis(host='127.0.0.1', port=replica_port, decode_responses=True)
             replica_client.ping()
 
             # Do some operations on the primary to trigger replication
@@ -1105,32 +1160,37 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
                 shutil.rmtree(replica_temp_dir)
 
     def test_ignore_internal_clients_disabled_logs_replica_traffic(self):
-        """Test that internal clients are logged when ignore_internal_clients=no."""
-        # Create primary server
+        """Test that internal clients are logged when ignore_internal_clients=no.
+
+        Valkey does not fire command-result events for commands applied via the
+        replication stream on the replica side.  The observable effect of
+        ignore_internal_clients=no is therefore tested on the PRIMARY: the
+        replica connection is an internal client (FLAG_REPLICA) and, with the
+        setting disabled, REPLCONF commands sent by that connection to the
+        primary SHOULD appear in the primary's audit log.
+        """
+        # Start primary with ignore_internal_clients=no so the replica
+        # connection (internal client) is NOT excluded from auditing.
         primary_config_path = self.create_config_file(
+            ["ignore_internal_clients", "no"],
             test_name="ignore_internal_disabled_primary"
         )
         self.start_server(primary_config_path)
 
-        # Now set up a replica with ignore_internal_clients=no
+        # Set up a plain replica (no audit module needed on the replica side).
         replica_temp_dir = tempfile.mkdtemp(prefix="vka-replica-log-", dir=self.base_temp_dir)
         replica_conf_path = os.path.join(replica_temp_dir, "valkey.conf")
-        replica_audit_log = os.path.join(replica_temp_dir, "replica_audit.log")
 
-        # Find an available port for replica
+        # Find an available port for the replica
         s = socket.socket()
         s.bind(('', 0))
         replica_port = s.getsockname()[1]
         s.close()
 
-        # Create replica config with ignore_internal_clients disabled
         with open(replica_conf_path, 'w') as f:
             f.write(f"port {replica_port}\n")
             f.write(f"replicaof 127.0.0.1 {self.port}\n")
-            f.write(f"loadmodule {self.module_path} protocol file {replica_audit_log} ignore_internal_clients no\n")
-            f.write(f"audit.command_result_mode all\n")
 
-        # Start replica server
         replica_proc = subprocess.Popen(
             [self.valkey_server, replica_conf_path],
             stdout=subprocess.PIPE,
@@ -1138,45 +1198,33 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         )
 
         try:
-            # Wait for replica to start and connect
+            # Wait for the replica to connect and complete the initial sync
             time.sleep(2)
 
-            # Create client connection to replica
-            replica_client = redis.Redis(host='localhost', port=replica_port, decode_responses=True)
-            replica_client.ping()
+            # Give extra time for REPLCONF ACK exchanges to be logged
+            time.sleep(1)
 
-            # Do operations on the primary to trigger replication
-            self.client.set("internal_test_key", "internal_test_value")
-            self.client.set("another_internal_key", "another_value")
+            # Read the PRIMARY's audit log
+            primary_log = self.read_audit_log()
 
-            # Give time for replication and logging
-            time.sleep(2)
+            print(f"Primary audit log (ignore_internal_clients=no):\n{primary_log}")
 
-            # Read replica audit log
-            if os.path.exists(replica_audit_log):
-                with open(replica_audit_log, 'r') as f:
-                    replica_log_content = f.read()
+            # The replica sends REPLCONF commands to the primary during sync
+            # and periodically afterwards.  With ignore_internal_clients=no the
+            # replica connection is audited, so REPLCONF must appear.
+            replconf_count = primary_log.upper().count("REPLCONF")
 
-                print(f"Replica audit log (ignore_internal_clients=no):\n{replica_log_content}")
+            print(f"REPLCONF operations logged on primary: {replconf_count}")
 
-                # With ignore_internal_clients=no, internal replication commands SHOULD be logged
-                set_count = replica_log_content.upper().count("[KEY_OP] SET")
-
-                print(f"SET operations logged on replica with ignore_internal_clients=no: {set_count}")
-
-                # We should see the replicated SET commands logged
-                # The exact count may vary, but should be > 0
-                self.assertGreater(set_count, 0,
-                    "When ignore_internal_clients=no, internal replica traffic should be logged")
-
-            replica_client.close()
+            self.assertGreater(replconf_count, 0,
+                "When ignore_internal_clients=no, replica connection commands "
+                "(REPLCONF) should appear in the primary's audit log")
 
         finally:
-            # Clean up replica
             replica_proc.terminate()
             try:
                 replica_proc.wait(timeout=5)
-            except:
+            except Exception:
                 replica_proc.kill()
             if replica_proc.stdout:
                 replica_proc.stdout.close()

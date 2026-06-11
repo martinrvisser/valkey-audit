@@ -44,11 +44,16 @@ jobs:
         run: |
           pip3 install -r test/unit/requirements.txt
 
+      - name: Create default audit log directory
+        run: |
+          mkdir -p /var/log/valkey
+          chmod 777 /var/log/valkey
+
       - name: Run unit tests
         env:
           AUDIT_MODULE_PATH: ${{ github.workspace }}/build/libvalkeyaudit.so
         run: |
-          pytest test/unit/ -v
+          pytest test/unit/ -v -rs
 
       - name: Determine release type
         id: release_type
