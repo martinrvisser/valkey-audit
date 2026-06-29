@@ -4141,9 +4141,11 @@ static int initAuditModule(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int 
 
 // Register the commands, connection callback and command filter functions
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-    if (ValkeyModule_Init(ctx,"audit",VALKEYAUDIT_MODULE_VERSION,VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR) 
+    if (ValkeyModule_Init(ctx,"audit",VALKEYAUDIT_MODULE_VERSION,VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
-    
+
+    ValkeyModule_SetModuleOptions(ctx, VALKEYMODULE_OPTIONS_HANDLE_ATOMIC_SLOT_MIGRATION);
+
     char buffer[128];
     snprintf(buffer, sizeof(buffer), 
                 "valkey-audit version: %s",
