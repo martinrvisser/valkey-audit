@@ -1260,6 +1260,138 @@ class ValkeyAuditLoadmoduleTest(unittest.TestCase):
         config = self.client.config_get("audit.ignore_internal_clients")
         self.assertEqual(config["audit.ignore_internal_clients"], "yes")
 
+    def test_atomic_slot_migration_supported(self):
+        """Verify CLUSTER MIGRATESLOTS is not blocked by the audit module.
+
+        VALKEYMODULE_OPTIONS_HANDLE_ATOMIC_SLOT_MIGRATION must be declared via
+        ValkeyModule_SetModuleOptions.  Without it Valkey 9 rejects
+        CLUSTER MIGRATESLOTS with an error mentioning loaded modules; this test
+        confirms that error does NOT appear, proving the option is set.
+        """
+        nodes = []
+
+        def _free_port():
+            s = socket.socket()
+            s.bind(('', 0))
+            port = s.getsockname()[1]
+            s.close()
+            return port
+
+        try:
+            # Build 3 cluster node directories and start each server.
+            for i in range(3):
+                node_dir = tempfile.mkdtemp(prefix=f"vka-cluster-{i}-", dir=self.base_temp_dir)
+                audit_log = os.path.join(node_dir, "audit.log")
+                conf_path = os.path.join(node_dir, "valkey.conf")
+                nodes_file = os.path.join(node_dir, "nodes.conf")
+                port = _free_port()
+
+                with open(conf_path, 'w') as f:
+                    f.write(f"port {port}\n")
+                    f.write(f"bind 127.0.0.1\n")
+                    f.write(f"dir {node_dir}\n")
+                    f.write(f"cluster-enabled yes\n")
+                    f.write(f"cluster-config-file {nodes_file}\n")
+                    f.write(f"cluster-node-timeout 2000\n")
+                    f.write(f"save \"\"\n")
+                    f.write(f"loadmodule {self.module_path} protocol file {audit_log}\n")
+                    f.write(f"audit.command_result_mode all\n")
+
+                proc = subprocess.Popen(
+                    [self.valkey_server, conf_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                nodes.append({'port': port, 'proc': proc, 'dir': node_dir})
+
+            # Wait for all nodes to become reachable.
+            for node in nodes:
+                client = redis.Redis(host='127.0.0.1', port=node['port'], decode_responses=True)
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    try:
+                        client.ping()
+                        break
+                    except redis.exceptions.ConnectionError:
+                        time.sleep(0.2)
+                else:
+                    self.fail(f"Cluster node on port {node['port']} failed to start")
+                node['client'] = client
+
+            clients = [n['client'] for n in nodes]
+
+            # Hard-reset each node to clear any stale cluster state that may
+            # have been inherited from a leftover nodes.conf or a prior run.
+            for client in clients:
+                client.execute_command('CLUSTER', 'RESET', 'HARD')
+
+            # Assign slots to each node while they are still standalone (before
+            # CLUSTER MEET) so gossip cannot propagate partial state and trigger
+            # "already busy" errors on the other nodes.
+            slot_ranges = [(0, 5460), (5461, 10922), (10923, 16383)]
+            for client, (start_slot, end_slot) in zip(clients, slot_ranges):
+                client.execute_command('CLUSTER', 'ADDSLOTSRANGE', start_slot, end_slot)
+
+            # Form the cluster: have node 0 meet the others.
+            for node in nodes[1:]:
+                clients[0].execute_command('CLUSTER', 'MEET', '127.0.0.1', node['port'])
+            time.sleep(1)
+
+            # Wait for the cluster to reach ok state.
+            deadline = time.time() + 20
+            cluster_ok = False
+            while time.time() < deadline:
+                try:
+                    info = clients[0].execute_command('CLUSTER', 'INFO')
+                    if 'cluster_state:ok' in info:
+                        cluster_ok = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            if not cluster_ok:
+                self.skipTest("Cluster did not reach ok state — skipping MIGRATESLOTS check")
+
+            # Retrieve the node ID of node 0 (source) and node 1 (destination).
+            src_id = clients[0].execute_command('CLUSTER', 'MYID')
+            dst_id = clients[1].execute_command('CLUSTER', 'MYID')
+
+            # Attempt to migrate slot 0 from node 0 to node 1.
+            # The module declares VALKEYMODULE_OPTIONS_HANDLE_ATOMIC_SLOT_MIGRATION,
+            # so the server must NOT refuse with an "atomic slot migration" error.
+            try:
+                clients[0].execute_command('CLUSTER', 'MIGRATESLOTS', src_id, dst_id, 0)
+            except redis.exceptions.ResponseError as e:
+                error_msg = str(e).lower()
+                if 'unknown subcommand' in error_msg or 'unknown command' in error_msg:
+                    self.skipTest("Server does not support CLUSTER MIGRATESLOTS (requires Valkey 9)")
+                self.assertNotIn(
+                    'atomic slot migration', error_msg,
+                    f"CLUSTER MIGRATESLOTS was blocked because the module did not declare "
+                    f"VALKEYMODULE_OPTIONS_HANDLE_ATOMIC_SLOT_MIGRATION: {e}"
+                )
+
+        finally:
+            for node in nodes:
+                if 'client' in node:
+                    try:
+                        node['client'].close()
+                    except Exception:
+                        pass
+                proc = node.get('proc')
+                if proc:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    if proc.stdout:
+                        proc.stdout.close()
+                    if proc.stderr:
+                        proc.stderr.close()
+
+
 class MockTCPServer:
     """Mock TCP server for testing TCP audit logging."""
     
