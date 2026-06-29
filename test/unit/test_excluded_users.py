@@ -25,7 +25,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         cls._start_valkey_server()
         
         # Connect to the server as admin
-        cls.redis_admin = redis.Redis(host='localhost', port=cls.port, password="defaultpass", decode_responses=True)
+        cls.redis_admin = redis.Redis(host='127.0.0.1', port=cls.port, password="defaultpass", decode_responses=True)
         
         # Wait for server to be ready
         max_retries = 10
@@ -84,6 +84,7 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         cls.conf_file = os.path.join(cls.temp_dir, "valkey.conf")
         with open(cls.conf_file, 'w') as f:
             f.write(f"port {cls.port}\n")
+            f.write("bind 127.0.0.1\n")
             f.write("aclfile /tmp/valkey-acl-test.acl\n")  # ACL enabled
             f.write("logfile /tmp/valkeytest.log\n")
             f.write(f"loadmodule {cls.module_path}\n")
@@ -136,18 +137,18 @@ class ValkeyAuditExcludedUsersTests(unittest.TestCase):
         
         # Create connections for each user
         cls.redis_user1 = redis.Redis(
-            host='localhost', 
-            port=cls.port, 
-            username=cls.user1, 
-            password="pass1", 
+            host='127.0.0.1',
+            port=cls.port,
+            username=cls.user1,
+            password="pass1",
             decode_responses=True
         )
-        
+
         cls.redis_user2 = redis.Redis(
-            host='localhost', 
-            port=cls.port, 
-            username=cls.user2, 
-            password="pass2", 
+            host='127.0.0.1',
+            port=cls.port,
+            username=cls.user2,
+            password="pass2",
             decode_responses=True
         )
     
