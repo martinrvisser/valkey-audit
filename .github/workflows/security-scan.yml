@@ -1,0 +1,53 @@
+security-scan:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Install dependencies (mirrors build-and-test)
+        run: |
+          yum install -y cmake make clang clang-tools-extra git python3 python3-pip \
+            gcc gcc-c++ jemalloc-devel openssl-devel
+
+      - name: Install Trivy
+        run: |
+          yum install -y curl
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan container filesystem for CVEs (SARIF)
+        run: |
+          trivy rootfs / \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --scanners vuln \
+            --skip-dirs /proc,/sys,/dev \
+            --format sarif \
+            --output trivy-results.sarif
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container-scan
+
+      - name: Fail build on CRITICAL/HIGH findings
+        run: |
+          trivy rootfs / \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --scanners vuln \
+            --skip-dirs /proc,/sys,/dev \
+            --exit-code 1 \
+            --format table
+
+      - name: Static analysis of module source
+        run: |
+          yum install -y cppcheck
+          cppcheck --enable=warning,performance,portability \
+            --error-exitcode=1 --inline-suppr \
+            --suppress=missingIncludeSystem \
+            src/
