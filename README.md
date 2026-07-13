@@ -11,13 +11,24 @@ This module provides comprehensive auditing capabilities for Valkey servers. It 
 
 ## Build Instructions
 
-ValkeyAudit uses CMake for building the Valkey module.
+ValkeyAudit uses CMake for building the Valkey module and it requires the `valkeymodule.h` header file from Valkey project (installed using the `valkey-devel` package). 
 
 ```bash
 mkdir build
 cmake -S . -B build
 cmake --build build --target all
 ```
+
+If `valkey-devel` package is not available for your system, you can clone it from the [Valkey repository](https://github.com/valkey-io/valkey) and specify the path using `VALKEY_INCLUDE_DIR`.
+
+```bash
+mkdir build
+VALKEY_VERSION=9.1.0 
+git clone --depth 1 --branch "${VALKEY_VERSION}" https://github.com/valkey-io/valkey.git valkey-src
+cmake -S . -B build -DVALKEY_INCLUDE_DIR=./valkey-src/src
+cmake --build build --target all
+```
+
 ## Installation
 
 ### Loading the Module
