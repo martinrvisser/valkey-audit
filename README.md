@@ -41,34 +41,38 @@ loadmodule /path/to/libvalkeyaudit.so audit.protocol "file /var/log/audit/valkey
 ```
 
 ### Configuring the Module
+
 The module uses the standard Valkey configuration facility which means that parameters can accessed with CONFIG SET and GET as well as written to the valkey.conf file with CONFIG REWRITE or manually.
 
 Available parameters:
-- `audit.enabled [yes|no]`: Enable or disable auditing.
-- `audit.always_audit_config [yes|no]`: Enable or disable the auditing of config commands regardless of per user events setting. This allows the logging of config commands for a user even if the user is in the exclusion list.
-- `audit.protocol [file|syslog|tcp]`: Logging protocol to use. 
-    When using the file protocol it should be followed by the filepath.
-    When using the syslog protocol it should be followed by the syslog facility.
-    When using the tcp protocol it should be followed by the double quoted host:port string.
-- `audit.format [text|json|csv]`: Log format.
-- `audit.events [event1,event2,...]`: Event categories to audit (connections,auth,config,keys,other,none,all).
-- `audit.command_result_mode [all|failures]`: Whether to log all commands (`all`) or only commands that fail or are rejected (`failures`). Default is `failures`.
-- `audit.payload_disable`: Disable logging command payloads.
-- `audit.payload_maxsize [size]`: Maximum payload size to log in bytes.
-- `audit.excluderules`: Specific usernames and/or IP addresses to exclude from auditing.
-- `audit.tcp_host`: Hostname or IP for target TCP destination to write audit messages.
-- `audit.tcp_port`: port destination to write audit messages.
-- `audit.tcp_timeout_ms`: timeout in ms for establishing TCP connection.
-- `audit.tcp_retry_interval_ms`:  retry interval for establishing TCP connections.
-- `audit.tcp_max_retries`: maximum number of retries to establish a TCP connection.
-- `audit.tcp_buffer_on_disconnect`: buffer messages during disconnected state from target TCP destination.
-- `audit.tcp_reconnect_on_failure`: automatic reconnect to TCP destination on failure.
-- `audit.ignore_internal_clients` : do not audit internal clients like replication clients
 
+| Config Name | Type | Available Value | Default | Description |
+| --- | --- | --- | --- | --- |
+| `audit.enabled` | boolean | yes \| no | yes | Enable or disable auditing. |
+| `audit.always_audit_config` | boolean | yes \| no | no | Enable or disable the auditing of config commands regardless of per user events setting.<br/> This allows the logging of config commands for a user even if the user is in the exclusion list. |
+| `audit.protocol` | string | file \| syslog \| tcp | file | Logging protocol to use. <br/> When using the file protocol it should be followed by the filepath.<br/>When using the syslog protocol it should be followed by the syslog facility.<br/>When using the tcp protocol it should be followed by the double quoted host:port string. |
+| `audit.format` | enum | text \| json \| csv |text | Log format. |
+| `audit.events` | something | connections \| auth \| config \| keys \| other \| none \| all  | all | Event categories to audit (comma-separated). |
+| `audit.command_result_mode` | enum | all \| failures | failures | Whether to log all commands (`all`) or only commands that fail or are rejected (`failures`) |
+| `audit.payload_disable` | boolean | yes \| no | no | Disable logging command payloads. |
+| `audit.payload_maxsize` | numeric | | 1024 | Maximum payload size to log in bytes. |
+| `audit.excluderules` | string | | | Specific usernames and/or IP addresses to exclude from auditing, see [Excluding users and/or IP addresses](#excluding-users-andor-ip-addresses). |
+| `audit.tcp_host` | string | | 127.0.0.1 | Hostname or IP for target TCP destination to write audit messages. |
+| `audit.tcp_port` | string | | 514 | Port destination to write audit messages. |
+| `audit.tcp_timeout_ms` | numeric | | 5000 | Timeout in ms for establishing TCP connection. |
+| `audit.tcp_retry_interval_ms` | numeric | | 1000 | Retry interval for establishing TCP connections. |
+| `audit.tcp_max_retries` | numeric | | 3 | maximum number of retries to establish a TCP connection. |
+| `audit.tcp_buffer_on_disconnect` | boolean | yes \| no | yes | Buffer messages during disconnected state from target TCP destination. |
+| `audit.tcp_reconnect_on_failure` | boolean | yes \| no | yes | Automatic reconnect to TCP destination on failure. |
+| `audit.ignore_internal_clients` | boolean | yes \| no | yes | Do not audit internal clients like replication clients. |
+| `audit.custom_category` | string | | | Define custom event category for auditing, see [Excluding commands through a custom category](#excluding-commands-through-a-custom-category). |
+| `audit.exclude_commands` | string | | | [Exclude specific commands from audit log](#exclude-specific-commands-from-audit-log) |
+| `audit.prefix_filter` | string | | | [Exclude commands by prefix](#exclude-commands-by-prefix) |
 
 ## Example Usage
 
 ### enable/disable
+
 To enable/disable auditing:
 
 ```
@@ -105,7 +109,7 @@ CONFIG SET AUDIT.FORMAT csv
 
 ### events
 
-To set the which event categories to audit, use one of the below: 
+To set the which event categories to audit, use one of the below:
 
 ```
 CONFIG SET AUDIT.EVENTS all          # Enable all events
@@ -114,6 +118,7 @@ CONFIG SET AUDIT.EVENTS connections,auth  # Enable only connection and auth even
 ```
 
 Available event categories:
+
 - `connections`: Client connections and disconnections
 - `auth`: Authentication attempts (with password redaction)
 - `config`: Configuration commands
@@ -130,6 +135,7 @@ CONFIG SET AUDIT.COMMAND_RESULT_MODE all
 ```
 
 **`failures` (default)** — logs only commands that did not complete successfully:
+
 - Commands that executed but returned an error (e.g. `WRONGTYPE`, out-of-range index)
 - Commands rejected before execution: wrong argument count, unknown command, OOM, read-only replica, busy script, etc.
 - ACL rejections: `NOPERM` (command, key, channel, or database) and `NOAUTH`
@@ -166,6 +172,7 @@ CONFIG GET AUDIT.FORMAT
 ### excluding users and/or IP addresses
 
 Rules to set usernames and/or IP addresses to be excluded from auditing through a comma-separated list. The rule formats are :
+
 ```
 username            # for username-only exclusion
 @ipaddress          # for IPaddress-only exclusion
@@ -183,9 +190,11 @@ To remove the current list of exclusion rules
 ```
 CONFIG SET AUDIT.EXCLUDERULES ""
 ```
+
 ### TCP destination
 
 Setting the TCP connection parameters:
+
 ```
 CONFIG SET audit.tcp_host 127.0.0.1
 CONFIG SET audit.tcp_port 9514
@@ -195,40 +204,50 @@ CONFIG SET audit.tcp_max_retries 3
 ```
 
 Behaviour for disconnects:
+
 ```
 CONFIG SET audit.tcp_buffer_on_disconnect yes
 CONFIG SET audit.tcp_reconnect_on_failure yes
 ```
 
 ### Additional exclusion options
+
 Additional options to exclude are available through specific command exclusions, command prefix exclusion (e.g. for modules) and creation of a custom category
 
 #### Exclude specific commands from audit log
+
 ```
 CONFIG SET audit.exclude_commands "PING,ECHO,TIME"
 ```
 
 #### Exclude commands by prefix
+
 These need to be preceeded with a !
+
 ```
 CONFIG SET audit.prefix_filter "!FT*"
 ```
 
 #### Excluding commands through a custom category
+
 Custom categories can be created by the user and subsequently added to the events exclusion list
 
 ##### Define custom category and associated commands
+
 The format here is "categoryname:commands in this category"
+
 ```
 CONFIG SET audit.custom_category "flushes:FLUSHDB,FLUSHALL"
 ```
 
 ##### Define custom admin category  
+
 ```
 CONFIG SET audit.custom_category "admin:CONFIG,ACL,SAVE,BGSAVE"
 ```
 
 ##### Then use in event mask
+
 ```
 CONFIG SET audit.events "connections,auth,flushes,admin"
 ```
@@ -264,6 +283,7 @@ To stop the servers, run:
 The unit tests are written in python and can be found in the test/unit directory. They will start a local valkey server with the module loaded.
 
 Requirements:
+
 - valkey installation, environment variable VALKEY_SERVER if not in the path
 - environment variable AUDIT_MODULE_PATH to point at the module shared library libvalkeyaudit.so
   
@@ -274,7 +294,7 @@ To do: automation
 Every audit log entry contains the following fields regardless of format:
 
 | Field | Description |
-|---|---|
+|---|--- |
 | `timestamp` | Local time in `YYYY-MM-DD HH:MM:SS` |
 | `category` | Event category: `CONNECTION`, `AUTH`, `CONFIG`, `KEY_OP`, `OTHER` |
 | `command` | Command name as reported by the server (e.g. `set`, `config\|get`) |
@@ -292,7 +312,7 @@ Every audit log entry contains the following fields regardless of format:
 ### command_args by category
 
 | Category | Contents |
-|---|---|
+| --- | --- |
 | `KEY_OP` | `key=<key> [payload=<value>]` |
 | `CONFIG` | `subcommand=<GET\|SET> [param=<name>]` |
 | `AUTH` | `password=<REDACTED>` |
@@ -301,7 +321,7 @@ Every audit log entry contains the following fields regardless of format:
 
 ### Text format
 
-```
+```plaintext
 [2026-01-21 09:54:07] [KEY_OP] set result=SUCCESS duration_us=6 keys_modified=1 client_id=4 username=default client_ip=127.0.0.1:30414 server_hostname=myserver key=user:1001 payload=hello
 [2026-01-21 09:54:08] [KEY_OP] lpush result=FAILURE duration_us=12 keys_modified=0 client_id=4 username=default client_ip=127.0.0.1:30414 server_hostname=myserver key=mystring
 [2026-01-21 09:54:09] [AUTH] set result=FAILURE duration_us=3 keys_modified=0 client_id=5 username=keyuser client_ip=127.0.0.1:30415 server_hostname=myserver key=forbidden:key acl_deny_reason=key acl_object=forbidden:key
@@ -324,7 +344,7 @@ Each entry is a single-line JSON object:
 
 Columns (13 total): `timestamp`, `category`, `command`, `command_args`, `result`, `duration_us`, `keys_modified`, `client_id`, `username`, `client_ip`, `client_port`, `server_hostname`, `error`. Commas within a field are escaped with a backslash.
 
-```
+```csv
 2026-01-21 09:54:07,KEY_OP,set,key=user:1001 payload=hello,SUCCESS,6,1,4,default,127.0.0.1,30414,myserver,
 2026-01-21 09:54:08,KEY_OP,lpush,key=mystring,FAILURE,12,0,4,default,127.0.0.1,30414,myserver,
 2026-01-21 09:54:09,AUTH,set,key=forbidden:key,FAILURE,3,0,5,keyuser,127.0.0.1,30415,myserver,acl_deny_reason=key acl_object=forbidden:key
@@ -333,5 +353,3 @@ Columns (13 total): `timestamp`, `category`, `command`, `command_args`, `result`
 ## License
 
 This module is licensed under the same terms as Valkey itself.
-
-
