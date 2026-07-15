@@ -1,0 +1,171 @@
+name: Publish module image
+
+# Publishes a minimal multi-arch (amd64 + arm64) OCI image containing only
+# libvalkeyaudit.so to GHCR, for use as a Kubernetes ImageVolume.
+#
+# Strategy: build each arch NATIVELY (no QEMU) on its own runner, push each by
+# digest, then merge into one manifest list. The per-arch builds set
+# provenance/sbom = false so the published manifest list contains exactly two
+# platform entries and NO `unknown/unknown` attestation manifest -- some
+# kubelet/containerd ImageVolume paths choke on that. Supply-chain metadata is
+# instead attached to the final index digest via GitHub attestations + cosign.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      valkey_version:
+        description: 'Valkey version whose valkeymodule.h to build against'
+        required: false
+        default: '9.1.0'
+
+env:
+  REGISTRY: ghcr.io
+  # IMAGE_NAME is computed per-job (see "Normalize image name" steps): GHCR
+  # requires an all-lowercase repository path, but ${{ github.repository }} can
+  # contain uppercase owner/repo characters, which workflow-level `env:` cannot
+  # lowercase. The -module suffix keeps this separate from a future full-runtime image,
+  # i.e. the package is published as <owner>/valkey-audit-module.
+  VALKEY_VERSION: ${{ github.event.inputs.valkey_version || '9.1.0' }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Normalize image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}-module" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.module
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            VALKEY_VERSION=${{ env.VALKEY_VERSION }}
+          # Keep the manifest list clean for ImageVolume consumers.
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: Merge and publish manifest
+    runs-on: ubuntu-24.04
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write        # cosign keyless
+      attestations: write     # GitHub build provenance
+    steps:
+      - name: Normalize image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}-module" >> "$GITHUB_ENV"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=valkey${{ env.VALKEY_VERSION }}
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          set -eux
+          REFS=""
+          for f in *; do
+            REFS="$REFS ${REGISTRY}/${IMAGE_NAME}@$(cat "$f")"
+          done
+          TAGS=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create $TAGS $REFS
+
+      - name: Inspect published index
+        run: |
+          docker buildx imagetools inspect \
+            "${REGISTRY}/${IMAGE_NAME}:$(jq -r '.labels["org.opencontainers.image.version"]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+
+      - name: Resolve index digest
+        id: digest
+        run: |
+          DIGEST=$(docker buildx imagetools inspect \
+            "${REGISTRY}/${IMAGE_NAME}:$(jq -r '.labels["org.opencontainers.image.version"]' <<< "$DOCKER_METADATA_OUTPUT_JSON")" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
