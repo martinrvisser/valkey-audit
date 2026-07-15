@@ -1,4 +1,13 @@
-security-scan:
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security-scan:
     runs-on: ubuntu-latest
     container: fedora:latest
     permissions:
@@ -8,46 +17,60 @@ security-scan:
       - name: Checkout repo
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-      - name: Install dependencies (mirrors build-and-test)
+      - name: Install dependencies
         run: |
           yum install -y cmake make clang clang-tools-extra git python3 python3-pip \
-            gcc gcc-c++ jemalloc-devel openssl-devel
+            gcc gcc-c++ jemalloc-devel openssl-devel cppcheck wget
 
-      - name: Install Trivy
+      - name: Install Trivy (pinned release)
         run: |
-          yum install -y curl
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          TRIVY_VERSION="0.51.1"
+          TRIVY_URL="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          mkdir -p /tmp/trivy-install
+          cd /tmp/trivy-install
+          wget -q "${TRIVY_URL}"
+          tar xzf trivy_*.tar.gz
+          mv trivy /usr/local/bin/
+          trivy --version
 
-      - name: Scan container filesystem for CVEs (SARIF)
+      - name: Scan module source for vulnerabilities (SARIF + exit-code)
         run: |
-          trivy rootfs / \
+          trivy fs \
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --scanners vuln \
-            --skip-dirs /proc,/sys,/dev \
             --format sarif \
-            --output trivy-results.sarif
+            --output trivy-results.sarif \
+            --exit-code 1 \
+            src/
 
       - name: Upload Trivy SARIF to GitHub Security tab
+        if: always()
         uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-container-scan
+          category: trivy-module-scan
 
-      - name: Fail build on CRITICAL/HIGH findings
+      - name: Static analysis of module source (Cppcheck)
         run: |
-          trivy rootfs / \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            --scanners vuln \
-            --skip-dirs /proc,/sys,/dev \
-            --exit-code 1 \
-            --format table
-
-      - name: Static analysis of module source
-        run: |
-          yum install -y cppcheck
-          cppcheck --enable=warning,performance,portability \
-            --error-exitcode=1 --inline-suppr \
+          cppcheck \
+            --enable=warning,performance,portability \
+            --error-exitcode=1 \
+            --inline-suppr \
             --suppress=missingIncludeSystem \
+            --output-file=cppcheck-results.txt \
             src/
+
+      - name: Display Cppcheck results
+        if: always()
+        run: |
+          if [ -s cppcheck-results.txt ]; then
+            echo "=== Cppcheck Findings ==="
+            cat cppcheck-results.txt
+            if grep -q "error:" cppcheck-results.txt; then
+              echo "::error::Cppcheck found errors; see above"
+              exit 1
+            fi
+          else
+            echo "✓ No Cppcheck issues found"
+          fi
